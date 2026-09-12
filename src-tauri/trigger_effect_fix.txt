@@ -1,0 +1,15 @@
+﻿#[tauri::command]
+pub async fn trigger_effect(state: tauri::State<'_, AppState>, effect: String, active: bool) -> Result<(), String> {
+    let ov = state.overlay.lock().map_err(|e| e.to_string())?;
+    ov.toggle_effect(&effect, active);
+    log::info!("Effect '{}' active={}", effect, active);
+    // Overlay window: show when any non-magnifier effect is active
+    let has_fx = ov.is_effect_active("step_marker")
+        || ov.is_effect_active("highlighter")
+        || ov.is_effect_active("ripple");
+    if let Ok(mut ow) = state.overlay_window.lock() {
+        if has_fx && state.is_recording.load(Ordering::SeqCst) { ow.show(); }
+        else { ow.hide(); }
+    }
+    Ok(())
+}

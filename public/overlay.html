@@ -1,0 +1,679 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; }
+    canvas { display: block; width: 100%; height: 100%; }
+  </style>
+</head>
+<body>
+  <canvas id="ov"></canvas>
+  <script>
+    // The overlay window: transparent, always-on-top, click-through.
+    // It only draws the effect artwork (dim + magnifier lens + step markers +
+    // highlighter pen strokes + click ripples). It must NEVER draw the desktop
+    // background itself.
+    //
+    // Flicker hardening: every frame is first rendered completely into an
+    // offscreen `scene` canvas, then the window canvas is REPLACED in a single
+    // `copy` composite. The dim layer never comes and goes between frames, so
+    // the desktop-capture pipeline (which samples this window) sees a stable
+    // picture instead of alternating bright (no dim) / dark (dim) frames.
+    const api = window.__directorcam;
+    const canvas = document.getElementById("ov");
+    const ctx = canvas.getContext("2d");
+    const scene = document.createElement("canvas");
+
+    let dpr = 1;
+    function resize() {
+      dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(window.innerWidth * dpr);
+      canvas.height = Math.round(window.innerHeight * dpr);
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    // Latest frame payload from the recorder page: { magnifier, highlighter,
+    // markers, ripples, countdown, cursor } plus the main process injecting the
+    // live cursor.
+    let frame = null;
+
+    // Record-start countdown: the big center number persists between pushes so
+    // the rAF loop can keep it animating even when the page is busy.
+    let countdown = null;
+    let countdownChanged = 0;
+
+    // --- Highlighter ink (local mirror of the streaming pen events). ---
+    // Points arrive as tiny incremental events (ov-pen: down/pt/up/clear/trim)
+    // the moment they are sampled; strokes live HERE and are redrawn on every
+    // 60Hz cursor update while drawing, so the trail tracks the mouse with no
+    // perceptible lag. Strokes are independent: press to draw, release to
+    // lift; a new press starts a fresh stroke.
+    let penStrokes = [];
+    let penDrawing = false;
+    let penLastPt = null;
+    let penStyleLevel = 1;
+    // Trailing 60Hz cursor samples accumulated HERE (locally, on the overlay)
+    // while drawing. Accepted points arrive from the page's own dc-cursor
+    // stream, which is 2px-debounced and rides a busy IPC path — slow drags
+    // would otherwise drop EVERY point and render as a rotating ray with no
+    // history. Accumulating the samples in the overlay keeps the trail on the
+    // real mouse path no matter how lazy the page stream is.
+    let penLiveTail = [];
+    function penApply(ev) {
+      if (!ev || typeof ev !== "object") return;
+      if (ev.t === "clear") { penStrokes = []; penDrawing = false; penLastPt = null; penLiveTail = []; }
+      else if (ev.t === "trim") { if (penStrokes.length > 1) penStrokes.shift(); }
+      else if (ev.t === "down") {
+        penDrawing = true;
+        penLastPt = { x: ev.x, y: ev.y, color: ev.color };
+        penStrokes.push([penLastPt]);
+        penLiveTail = [];
+      } else if (ev.t === "pt") {
+        const pt = { x: ev.x, y: ev.y, color: ev.color };
+        if (!penDrawing) { penDrawing = true; penStrokes.push([pt]); }
+        else if (penStrokes.length) penStrokes[penStrokes.length - 1].push(pt);
+        else penStrokes.push([pt]);
+        penLastPt = pt;
+        penLiveTail = []; // authoritative point supersedes the local tail
+      } else if (ev.t === "up") { penDrawing = false; penLiveTail = []; }
+      draw();
+    }
+    function drawInk(g) {
+      if (!penStrokes.length && !penDrawing) return;
+      // All three pen levels are SOLID lines (only thickness/blur differ) —
+      // dashed/dotted styles read as broken strokes.
+      const PEN = (penStyleLevel === 2)
+        ? { width: 9, dash: [], blur: 12 }
+        : (penStyleLevel === 3) ? { width: 13, dash: [], blur: 16 }
+        : { width: 5, dash: [], blur: 8 };
+      g.lineJoin = "round";
+      g.lineCap = "round";
+      g.lineWidth = PEN.width;
+      g.setLineDash(PEN.dash);
+      g.shadowColor = "rgba(255,180,0,0.45)";
+      g.shadowBlur = PEN.blur;
+      const runStroke = (pts) => {
+        if (!pts.length) return;
+        g.beginPath();
+        g.moveTo(pts[0].x, pts[0].y);
+        for (let i = 1; i < pts.length; i++) g.lineTo(pts[i].x, pts[i].y);
+        g.strokeStyle = pts[pts.length - 1].color || pts[0].color;
+        g.stroke();
+      };
+      const runColorRuns = (pts) => {
+        let run = [];
+        for (const q of pts) {
+          if (run.length && run[run.length - 1].color !== q.color) { runStroke(run); run = []; }
+          run.push(q);
+        }
+        if (run.length) runStroke(run);
+      };
+      // Each press-drag-release is its OWN stroke — releasing lifts the pen;
+      // the next press starts fresh and is NEVER connected to prior ink.
+      for (let si = 0; si < penStrokes.length; si++) {
+        runColorRuns(penStrokes[si]);
+      }
+      // LIVE trail: last accepted point -> accumulated 60Hz samples -> cursor.
+      // Stroked as ONE continuous polyline so the ink stays glued to the real
+      // mouse path between accepted points (slow drags never break into dots).
+      if (penDrawing && penLastPt && frame && frame.cursor && typeof frame.cursor.x === "number") {
+        g.beginPath();
+        g.moveTo(penLastPt.x, penLastPt.y);
+        for (const q of penLiveTail) g.lineTo(q.x, q.y);
+        g.lineTo(frame.cursor.x, frame.cursor.y);
+        g.strokeStyle = penLastPt.color;
+        g.stroke();
+      }
+      g.setLineDash([]);
+      g.shadowBlur = 0;
+    }
+
+    // --- Persistent mark visuals (FF banner / privacy boxes / draw mode). ---
+    // These are overlay-resident (independent of the page's frame pushes) and
+    // ARE captured into the recording, by design.
+    let ff = { on: false };
+    let privacyBoxes = [];   // normalized rects {x,y,w,h}
+    let privacyBoxStartMs = 0; // wall-clock when the current mask box appeared (drives the HUD timer)
+    let drawState = { on: false, mode: "privacy", dragging: false, x0: 0, y0: 0, x1: 0, y1: 0 };
+    let drawHint = "";
+
+    // Reusable off-screen canvas for the lens pixels.
+    let lensCanvas = null;
+    function putLensImage(img) {
+      lensCanvas = lensCanvas || document.createElement("canvas");
+      if (lensCanvas.width !== img.w) lensCanvas.width = img.w;
+      if (lensCanvas.height !== img.h) lensCanvas.height = img.h;
+      lensCanvas.getContext("2d").putImageData(new ImageData(new Uint8ClampedArray(img.data), img.w, img.h), 0, 0);
+      return lensCanvas;
+    }
+
+    function setSceneSize(g) {
+      if (scene.width !== canvas.width) scene.width = canvas.width;
+      if (scene.height !== canvas.height) scene.height = canvas.height;
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.imageSmoothingEnabled = true;
+      g.imageSmoothingQuality = "high";
+    }
+
+    function onFrame(p) {
+      if (!p || typeof p !== "object") { return; }
+      const prevCursor = frame ? frame.cursor : null;
+      frame = p;
+      if (!(p.cursor && typeof p.cursor.x === "number") && prevCursor) frame.cursor = prevCursor;
+      const cd = (typeof p.countdown === "number") ? p.countdown : null;
+      if (cd !== countdown) {
+        countdown = cd;
+        countdownChanged = Date.now();
+      }
+      draw();
+    }
+    function onClear() {
+      frame = null;
+      countdown = null;
+      penStrokes = [];
+      penDrawing = false;
+      penLastPt = null;
+      if (ff.on || privacyBoxes.length > 0 || drawState.on) {
+        // Persistent mark visuals survive the effects-clear (they must stay
+        // on screen and in the recording until their own end signal).
+        draw();
+        ensurePersistentLoop();
+      } else {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+    }
+
+    const RIPPLE_MS = 900;
+    function ripplesActive() {
+      if (!frame || !Array.isArray(frame.ripples)) return false;
+      const now = Date.now();
+      for (const r of frame.ripples) {
+        if (r.start && now - r.start < RIPPLE_MS) return true;
+      }
+      return false;
+    }
+    let raf = null;
+    function maybeAnimate() {
+      if ((ripplesActive() || countdown !== null) && !raf) {
+        raf = requestAnimationFrame(function loop() {
+          raf = null;
+          draw();
+          maybeAnimate();
+        });
+      }
+    }
+
+    function drawScene(g) {
+      const W = window.innerWidth;
+      const H = window.innerHeight;
+      g.clearRect(0, 0, W, H);
+      if (!frame) return;
+
+      // Step markers (numbered, normalized 0..1 coords) with connector lines.
+      const MARKER_FILLS = { red: "rgba(224,72,72,0.94)", yellow: "rgba(232,190,40,0.94)", blue: "rgba(64,128,255,0.92)" };
+      const MARKER_TEXT = { red: "#fff", yellow: "rgba(40,40,40,0.95)", blue: "#fff" };
+      if (Array.isArray(frame.markers)) {
+        for (let i = 0; i < frame.markers.length; i++) {
+          const m = frame.markers[i];
+          const cx = m.x * W;
+          const cy = m.y * H;
+          const fill = MARKER_FILLS[m.color] || MARKER_FILLS.blue;
+          const txt = MARKER_TEXT[m.color] || MARKER_TEXT.blue;
+          if (i > 0) {
+            const pm = frame.markers[i - 1];
+            g.strokeStyle = "rgba(90,110,160,0.45)";
+            g.lineWidth = 3;
+            g.beginPath();
+            g.moveTo(pm.x * W, pm.y * H);
+            g.lineTo(cx, cy);
+            g.stroke();
+          }
+          const r = Math.max(15, W * 0.018);
+          g.beginPath();
+          g.arc(cx, cy, r, 0, Math.PI * 2);
+          g.fillStyle = fill;
+          g.fill();
+          g.strokeStyle = "#fff";
+          g.lineWidth = 3;
+          g.stroke();
+          g.fillStyle = txt;
+          g.font = "bold " + Math.round(r * 1.25) + "px system-ui, sans-serif";
+          g.textAlign = "center";
+          g.textBaseline = "middle";
+          g.fillText(String(i + 1), cx, cy + 1);
+        }
+      }
+
+      // Cursor position in DIP screen coords (client px on this overlay).
+      const curX = (frame.cursor && typeof frame.cursor.x === "number") ? frame.cursor.x : null;
+      const curY = (frame.cursor && typeof frame.cursor.y === "number") ? frame.cursor.y : null;
+
+      // Highlighter ink lives in the local penStrokes mirror (streaming
+      // ov-pen events); the style level rides the frame pushes.
+      if (frame.highlighter) {
+        penStyleLevel = Number(frame.highlighter.level) || 1;
+        drawInk(g);
+        if (penDrawing && curX !== null) {
+          g.beginPath();
+          g.arc(curX, curY, 5, 0, Math.PI * 2);
+          g.fillStyle = (penLastPt && penLastPt.color) || "rgba(255,210,40,0.95)";
+          g.fill();
+        }
+      }
+
+      // Magnifier: dim the desktop, then a glass that magnifies what sits at
+      // the cursor. The glass (sent radius R) is anchored a safe distance from
+      // the cursor so it never re-captures its own pixels from the stream
+      // (hall-of-mirrors). R grows with the zoom level.
+      if (frame.magnifier && curX !== null) {
+        const m = frame.magnifier;
+        const R = Number(m.R) || Math.max(60, Math.min(W, H) * 0.16);
+        const gx = Number(m.gx);
+        const gy = Number(m.gy);
+        const hasGlass = Number.isFinite(gx) && Number.isFinite(gy) && m.image && m.image.data;
+
+        // Dim the desktop, then punch out just the glass so it stays full-bright.
+        g.fillStyle = "rgba(0,0,0,0.42)";
+        g.fillRect(0, 0, W, H);
+        g.globalCompositeOperation = "destination-out";
+        g.beginPath();
+        if (hasGlass) g.arc(gx, gy, R, 0, Math.PI * 2);
+        g.closePath();
+        g.fill();
+        g.globalCompositeOperation = "source-over";
+
+        // Glass with the magnified source image.
+        if (hasGlass) {
+          const off = putLensImage(m.image);
+          g.save();
+          g.beginPath();
+          g.arc(gx, gy, R, 0, Math.PI * 2);
+          g.closePath();
+          g.shadowColor = "rgba(0,0,0,0.5)";
+          g.shadowBlur = 24;
+          g.fillStyle = "#000";
+          g.fill();
+          g.restore();
+          g.save();
+          g.beginPath();
+          g.arc(gx, gy, R - 2, 0, Math.PI * 2);
+          g.closePath();
+          g.clip();
+          g.drawImage(off, gx - R, gy - R, R * 2, R * 2);
+          g.restore();
+        }
+
+        // Glass border.
+        if (hasGlass) {
+          g.beginPath();
+          g.arc(gx, gy, R, 0, Math.PI * 2);
+          g.strokeStyle = "rgba(255,255,255,0.9)";
+          g.lineWidth = 3;
+          g.stroke();
+        }
+      }
+
+      // Click ripples: expanding rings that fade out (~0.9s each). Each ripple's
+      // color is the strong-contrast complement of the desktop region beneath
+      // it, sent by the page as {h,s,l}. They continue animating between page
+      // pushes via the rAF loop above.
+      // NOTE: `start` is a Date.now() epoch timestamp sent by the page — age is
+      // compared against Date.now() here, NOT performance.now() (the two clocks
+      // have different zero references across processes).
+      if (Array.isArray(frame.ripples) && frame.ripples.length) {
+        const now = Date.now();
+        for (const r of frame.ripples) {
+          if (!r || typeof r.x !== "number" || !r.start) continue;
+          const age = now - r.start;
+          if (age < 0 || age > RIPPLE_MS) continue;
+          const t = age / RIPPLE_MS;
+
+          // Bright complement, or a springier warm-gold fallback (visible even
+          // with no live capture to sample from).
+          const cc = (r.color && typeof r.color.h === "number")
+            ? r.color
+            : { h: 45, s: 95, l: 62 };
+          const light = cc.l >= 0.5;
+          const hsla = (a) => "hsla(" + cc.h + "," + cc.s + "%," + cc.l + "%," + a.toFixed(3) + ")";
+          // Adaptive rim: a dark edge frames a LIGHT ripple, a white edge a
+          // DARK one — so the ring keeps crisp definition on both dark and
+          // light interfaces instead of dissolving into the background.
+          const rim = light ? "rgba(8,10,16,0.90)" : "rgba(255,255,255,0.95)";
+          const rad = 20 + t * Math.min(W, H) * 0.08;
+          const alpha = 0.72 * (1 - t) * (1 - t);
+          if (alpha <= 0) continue;
+
+          // Filled disc: a ring of color over a fading core (radial fade-in).
+          const glow = g.createRadialGradient(r.x, r.y, rad * 0.35, r.x, r.y, rad);
+          glow.addColorStop(0, hsla(0));
+          glow.addColorStop(0.55, hsla(alpha * 0.2));
+          glow.addColorStop(0.95, hsla(alpha * 0.65));
+          glow.addColorStop(1, hsla(alpha));
+          g.beginPath();
+          g.arc(r.x, r.y, rad, 0, Math.PI * 2);
+          g.fillStyle = glow;
+          g.fill();
+
+          // Contrast rim (wider under-stroke) + the color stroke on top.
+          g.beginPath();
+          g.arc(r.x, r.y, rad, 0, Math.PI * 2);
+          g.strokeStyle = rim;
+          g.lineWidth = 4 + 7 * (1 - t);
+          g.stroke();
+          g.beginPath();
+          g.arc(r.x, r.y, rad, 0, Math.PI * 2);
+          g.strokeStyle = hsla(alpha * 0.95);
+          g.lineWidth = 1.5 + 3.5 * (1 - t);
+          g.stroke();
+
+          // Spawn strike: a hot white core flash marks the click instantly.
+          if (t < 0.22) {
+            const ks = 1 - t / 0.22;
+            g.beginPath();
+            g.arc(r.x, r.y, 6 + 10 * ks, 0, Math.PI * 2);
+            g.strokeStyle = "rgba(255,255,255," + (0.95 * ks).toFixed(3) + ")";
+            g.lineWidth = 3;
+            g.stroke();
+            g.beginPath();
+            g.arc(r.x, r.y, 3, 0, Math.PI * 2);
+            g.fillStyle = "rgba(255,255,255," + (0.9 * ks).toFixed(3) + ")";
+            g.fill();
+          }
+        }
+      }
+
+      // Record-start countdown: big 3/2/1 centered on the primary display with
+      // a dark glass backdrop so it reads over any app. Pulse-scales on each
+      // number change (~280ms), then holds steady until the next number frame.
+      if (countdown !== null && countdown >= 1) {
+        const cx = W / 2;
+        const cy = H / 2;
+        const base = Math.max(110, Math.min(W, H) * 0.17);
+        const pop = Math.min(1, (Date.now() - countdownChanged) / 280);
+        const r = base * (1 + 0.22 * (1 - pop));
+        g.beginPath();
+        g.arc(cx, cy, r, 0, Math.PI * 2);
+        g.fillStyle = "rgba(5,7,12,0.68)";
+        g.fill();
+        g.lineWidth = 5;
+        g.strokeStyle = "rgba(255,255,255,0.92)";
+        g.stroke();
+        g.beginPath();
+        g.arc(cx, cy, r * 0.72, 0, Math.PI * 2);
+        g.lineWidth = 2;
+        g.strokeStyle = "rgba(255,255,255,0.25)";
+        g.stroke();
+        g.font = "bold " + Math.round(r * 1.05) + "px system-ui, sans-serif";
+        g.textAlign = "center";
+        g.textBaseline = "middle";
+        g.fillStyle = "#ffffff";
+        g.shadowColor = "rgba(0,0,0,0.55)";
+        g.shadowBlur = 18;
+        g.fillText(String(countdown), cx, cy + 2);
+        g.shadowBlur = 0;
+      }
+    }
+
+    function drawPersistent(g) {
+      const W = window.innerWidth;
+      const H = window.innerHeight;
+
+      // Privacy mask boxes drawn as a visible MOSAIC block (captured into the
+      // recording): a pixelated checker pattern reads unmistakably as
+      // "redacted", unlike a flat black bar which can look like a UI glitch.
+      for (const b of privacyBoxes) {
+        const bx = b.x * W, by = b.y * H, bw = b.w * W, bh = b.h * H;
+        g.save();
+        g.beginPath();
+        g.rect(bx, by, bw, bh);
+        g.clip();
+        g.fillStyle = "#14161d";
+        g.fillRect(bx, by, bw, bh);
+        // Mosaic tiles: alternate light/dark cells sized to the box (8-14px).
+        const cell = Math.max(8, Math.min(14, Math.round(Math.min(bw, bh) / 5)));
+        for (let ty = 0; ty < bh; ty += cell) {
+          for (let tx = 0; tx < bw; tx += cell) {
+            const on = ((Math.floor(tx / cell) + Math.floor(ty / cell)) % 2) === 0;
+            g.fillStyle = on ? "rgba(255,255,255,0.13)" : "rgba(0,0,0,0.35)";
+            g.fillRect(bx + tx, by + ty, cell, cell);
+          }
+        }
+        g.restore();
+        g.strokeStyle = "rgba(255,255,255,0.55)";
+        g.lineWidth = 2;
+        g.strokeRect(bx + 1, by + 1, bw - 2, bh - 2);
+      }
+
+      // Persistent "mask is live" HUD pill: the mosaic block itself is the
+      // primary cue, but a top banner makes the ACTIVE state unmistakable so
+      // the user always knows a second F6 ends it. Deliberately recorded —
+      // it reads as "this part is redacted", not as a UI glitch.
+      if (privacyBoxes.length > 0 && privacyBoxStartMs > 0) {
+        const secs = Math.max(0, (Date.now() - privacyBoxStartMs) / 1000);
+        const m = Math.floor(secs / 60);
+        const s = Math.floor(secs % 60);
+        const label = "\uD83D\uDEE1\uFE0F \u906E\u6321\u4E2D " + m + ":" + String(s).padStart(2, "0") + " \u00B7 F6 \u7ED3\u675F";
+        g.font = "bold " + Math.round(Math.max(15, W * 0.015)) + "px system-ui, sans-serif";
+        const tw = g.measureText(label).width;
+        const pad = 12;
+        const pillW = tw + pad * 2;
+        const pillH = Math.max(28, W * 0.022);
+        const px = W / 2 - pillW / 2;
+        const py = Math.round(H * 0.03);
+        g.fillStyle = "rgba(12,14,20,0.82)";
+        g.beginPath();
+        if (g.roundRect) g.roundRect(px, py, pillW, pillH, 8); else g.rect(px, py, pillW, pillH);
+        g.fill();
+        g.strokeStyle = "rgba(240,190,40,0.85)";
+        g.lineWidth = 1.5;
+        g.stroke();
+        g.fillStyle = "#ffd44d";
+        g.textAlign = "center";
+        g.textBaseline = "middle";
+        g.fillText(label, px + pillW / 2, py + pillH / 2 + 1);
+      }
+
+      // Fast-forward visuals: 30% black veil + corner badge + center hint.
+      // Intended to be recorded so the exported clip keeps the cue.
+      if (ff.on) {
+        g.fillStyle = "rgba(0,0,0,0.30)";
+        g.fillRect(0, 0, W, H);
+
+        const label = "\u23E9 \u5FEB\u8FDB\u4E2D";
+        g.font = "bold " + Math.round(Math.max(18, W * 0.02)) + "px system-ui, sans-serif";
+        const tw = g.measureText(label).width;
+        const pad = 14;
+        const bw = tw + pad * 2;
+        const bh = Math.max(34, W * 0.032);
+        const bx = W - bw - Math.round(W * 0.03);
+        const by = Math.round(H * 0.05);
+        g.fillStyle = "rgba(10,12,18,0.78)";
+        g.beginPath();
+        if (g.roundRect) g.roundRect(bx, by, bw, bh, 8); else g.rect(bx, by, bw, bh);
+        g.fill();
+        g.strokeStyle = "rgba(255,255,255,0.5)";
+        g.lineWidth = 2;
+        g.stroke();
+        g.fillStyle = "#ffffff";
+        g.textAlign = "center";
+        g.textBaseline = "middle";
+        g.fillText(label, bx + bw / 2, by + bh / 2 + 1);
+
+        g.font = "bold " + Math.round(Math.max(26, W * 0.028)) + "px system-ui, sans-serif";
+        g.fillStyle = "rgba(255,255,255,0.92)";
+        g.shadowColor = "rgba(0,0,0,0.6)";
+        g.shadowBlur = 12;
+        g.fillText("\u89C6\u9891\u5FEB\u8FDB\u4E2D...", W / 2, H * 0.12);
+        g.shadowBlur = 0;
+      }
+
+      // Privacy draw mode: veil + hint + current drag rectangle.
+      if (drawState.on) {
+        g.fillStyle = "rgba(0,0,20,0.18)";
+        g.fillRect(0, 0, W, H);
+        // Session-specific hint (privacy mask vs region recording).
+        const x = Math.min(drawState.x0, drawState.x1);
+        const y = Math.min(drawState.y0, drawState.y1);
+        const w = Math.abs(drawState.x1 - drawState.x0);
+        const h = Math.abs(drawState.y1 - drawState.y0);
+        g.strokeStyle = "rgba(90,170,255,0.95)";
+        g.lineWidth = 2;
+        g.setLineDash([8, 6]);
+        g.strokeRect(x, y, w, h);
+        g.setLineDash([]);
+        // NOTE: no fill here — the drag preview must not be captured as a
+        // black box before the mark is confirmed.
+
+        g.font = "bold " + Math.round(Math.max(22, W * 0.022)) + "px system-ui, sans-serif";
+        g.textAlign = "center";
+        g.textBaseline = "middle";
+        g.fillStyle = "rgba(255,255,255,0.95)";
+        g.shadowColor = "rgba(0,0,0,0.7)";
+        g.shadowBlur = 10;
+        // Session-specific hint (privacy mask vs region recording) pushed by main.
+        g.fillText(drawHint || "\u62D6\u62FD\u6846\u9009\u9700\u8981\u906E\u6321\u7684\u533A\u57DF\uFF08F6 \u53D6\u6D88\uFF09", W / 2, Math.max(40, H * 0.06));
+        g.shadowBlur = 0;
+      }
+    }
+
+    function draw() {
+      const hasPersistent = ff.on || privacyBoxes.length > 0 || drawState.on;
+      if (!frame && !hasPersistent) return;
+      const g = scene.getContext("2d");
+      setSceneSize(g);
+      drawScene(g);
+      drawPersistent(g);
+      // Atomically replace the window content in ONE composite so the captured
+      // screen never shows a transient undimmed frame (flicker root cause).
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalCompositeOperation = "copy";
+      ctx.drawImage(scene, 0, 0);
+      ctx.globalCompositeOperation = "source-over";
+      maybeAnimate();
+    }
+
+    // Continuous rAF while persistent visuals are on (they animate/track the
+    // window size and must not depend on the recorder page's push cadence).
+    let persistentRaf = null;
+    function ensurePersistentLoop() {
+      if (persistentRaf) return;
+      persistentRaf = requestAnimationFrame(function loop() {
+        persistentRaf = null;
+        if (ff.on || privacyBoxes.length > 0 || drawState.on) {
+          draw();
+          ensurePersistentLoop();
+        }
+      });
+    }
+
+    // --- Privacy draw-mode mouse handling. The main process flips the
+    // overlay to mouse-visible while draw mode is on, so we receive raw
+    // events here and must NOT let them reach any app below.
+    window.addEventListener("mousedown", (e) => {
+      if (!drawState.on) return;
+      drawState.dragging = true;
+      drawState.x0 = drawState.x1 = e.clientX;
+      drawState.y0 = drawState.y1 = e.clientY;
+      try { api.send("dc-overlay-shield", true); } catch {}
+      draw();
+    });
+    window.addEventListener("mousemove", (e) => {
+      if (!drawState.on || !drawState.dragging) return;
+      drawState.x1 = e.clientX;
+      drawState.y1 = e.clientY;
+      draw();
+    });
+    window.addEventListener("mouseup", () => {
+      if (!drawState.on || !drawState.dragging) return;
+      drawState.dragging = false;
+      const W = window.innerWidth;
+      const H = window.innerHeight;
+      const rect = {
+        x: Math.min(drawState.x0, drawState.x1) / W,
+        y: Math.min(drawState.y0, drawState.y1) / H,
+        w: Math.abs(drawState.x1 - drawState.x0) / W,
+        h: Math.abs(drawState.y1 - drawState.y0) / H,
+      };
+      const valid = rect.w > 0.01 && rect.h > 0.01;
+      try { api.send("dc-overlay-shield", false); } catch {}
+      if (valid && drawState.mode === "privacy") {
+        // Show the mosaic box the INSTANT the drag ends — it must not depend on
+        // the IPC round trip to the page/main (which registers the mask + runs
+        // the backtrace). The main process repeats the same box afterwards; the
+        // redraw is idempotent. F6 again clears it.
+        privacyBoxes = [rect];
+        privacyBoxStartMs = Date.now();
+        drawState.on = false;
+        ensurePersistentLoop();
+        draw();
+      }
+      if (api && typeof api.invoke === "function") {
+        if (valid) {
+          void api.invoke("privacy_region_selected", { rect }).catch(() => {});
+        } else if (drawState.mode === "region") {
+          // Region recording: a click without a drag CANCELS the selection
+          // (privacy draw mode keeps waiting for a proper drag instead).
+          void api.invoke("privacy_region_selected", { rect: null }).catch(() => {});
+        }
+      }
+      draw();
+    });
+
+    if (api && typeof api.on === "function") {
+      api.on("ov-frame", (p) => { try { onFrame(p); } catch (e) { console.error(e); } });
+      api.on("ov-clear", () => { try { onClear(); } catch (e) { console.error(e); } });
+      api.on("ov-pen", (p) => { try { penApply(p); } catch (e) { console.error(e); } });
+      api.on("ov-ff", (p) => {
+        try {
+          ff.on = !!(p && p.on);
+          if (ff.on) ensurePersistentLoop();
+          draw();
+        } catch (e) { console.error(e); }
+      });
+      api.on("ov-privacy-draw", (p) => {
+        try {
+          const on = !!(p && p.on);
+          drawHint = (p && typeof p.hint === "string") ? p.hint : "";
+          drawState = { on, mode: (p && p.mode === "region") ? "region" : "privacy", dragging: false, x0: 0, y0: 0, x1: 0, y1: 0 };
+          // The overlay must swallow the mouse while the user drags the box.
+          try { api.send("dc-overlay-shield", on); } catch {}
+          if (on) ensurePersistentLoop();
+          draw();
+        } catch (e) { console.error(e); }
+      });
+      api.on("ov-privacy-box", (p) => {
+        try {
+          privacyBoxes = (p && p.rect) ? [p.rect] : [];
+          privacyBoxStartMs = privacyBoxes.length ? (privacyBoxStartMs || Date.now()) : 0;
+          if (privacyBoxes.length) ensurePersistentLoop();
+          draw();
+        } catch (e) { console.error(e); }
+      });
+      // Local release detection: finalize the live tail even if the page's
+      // ov-pen "up" is delayed behind the main thread's render work.
+      api.on("dc-mouse-up", () => { penDrawing = false; penLiveTail = []; draw(); });
+      // Also listen for the shared dc-cursor events so the overlay can position
+      // the ring/lens even between the page's per-frame pushes.
+      api.on("dc-cursor", (p) => {
+        if (p && typeof p.x === "number") {
+          if (frame) {
+            frame.cursor = { x: p.x, y: p.y };
+            if (penDrawing && penLastPt) {
+              // Accumulate the real mouse path locally (see penLiveTail note).
+              penLiveTail.push({ x: p.x, y: p.y });
+              if (penLiveTail.length > 512) penLiveTail.splice(0, penLiveTail.length - 512);
+            }
+            draw();
+          } else if (penDrawing || penStrokes.length) {
+            frame = { cursor: { x: p.x, y: p.y } };
+            draw();
+          }
+        }
+      });
+    }
+  </script>
+</body>
+</html>

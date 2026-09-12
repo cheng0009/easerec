@@ -1,0 +1,135 @@
+{
+  "app": {
+    "title": "简录 EaseRec",
+    "version": "v0.2",
+    "tagline": "让知识输出回归纯粹"
+  },
+  "studio": {
+    "title": "🔕 专注模式",
+    "enable": "关闭",
+    "enabled": "ON — 已屏蔽通知",
+    "hint": "F1 切换。隐藏任务栏，屏蔽通知。"
+  },
+  "effects": {
+    "title": "✨ 实时特效",
+    "magnifier": "🔍 放大镜",
+    "highlighter": "🖍 高亮笔",
+    "stepMarker": "①②③ 步进标记",
+    "ripple": "💧 点击涟漪",
+    "stepHint": "模式开启后：每次点击鼠标添加一个编号，ESC 退出",
+    "escHint": "ESC 退出"
+  },
+  "control": {
+    "record": "⏺ 录制",
+    "stop": "⬛ 停止",
+    "rewind3s": "⏪ 3秒",
+    "rewind5s": "⏪ 5秒",
+    "starting": "即将开始",
+    "hint": "F2/F3 倒带 · F9 录制 · Alt+Q/W/E/R 特效"
+  },
+  "preview": {
+    "placeholder": "录制开始后此处显示实时预览"
+  },
+  "timeline": {
+    "title": "⏱ 时间线",
+    "empty": "暂无标记 — 录制中按 F2/F3 倒带、F4 快进、F6 遮挡",
+    "hintRecording": "录制中产生的标记会显示在这里"
+  },
+  "export": {
+    "title": "📦 导出",
+    "silenceTrim": "静音裁剪",
+    "subtitles": "烧录字幕",
+    "outputDir": "输出目录",
+    "outputPlaceholder": "默认：桌面",
+    "exportBtn": "🎬 导出视频",
+    "processing": "导出中…",
+    "pickFolder": "选择输出文件夹",
+    "openFolder": "打开文件夹",
+    "subtitleStyle": "字幕样式",
+    "fontFamily": "字体",
+    "fontSize": "字号",
+    "color": "颜色",
+    "outline": "描边",
+    "position": "位置",
+    "posBottom": "底部",
+    "posMiddle": "居中",
+    "posTop": "顶部",
+    "marginV": "边距",
+    "llm": "LLM 在线校正",
+    "llmHint": "校正错别字与同音字；时间戳不受影响，失败自动回退本地结果",
+    "baseUrl": "接口地址",
+    "apiKey": "API Key",
+    "model": "模型",
+    "glossary": "热词表（每行一个）",
+    "asrLanguage": "识别语言",
+    "loudnorm": "响度归一 (EBU R128)",
+    "vertical": "同时导出竖版 9:16",
+    "grace": "隐私回溯宽限（秒）",
+    "ffTarget": "快进目标时长（秒）",
+    "recovery": "上次录制未正常结束",
+    "recoverOpen": "打开文件夹",
+    "recoverIgnore": "已处理好，不再提示",
+    "whisperMissing": "未找到 whisper-cli — 运行 scripts/download-whisper.ps1 下载后可用"
+  },
+  "status": {
+    "rec": "录制中",
+    "idle": "空闲",
+    "fps": "帧率",
+    "cpu": "CPU",
+    "audioSystem": "🔊 系统声音",
+    "audioMic": "🎤 麦克风",
+    "audioBoth": "🔊🎤 系统+麦克"
+  },
+  "language": {
+    "label": "语言",
+    "zh": "简体中文",
+    "en": "English"
+  },
+  "settings": {
+    "title": "⚙ 设置",
+    "shortcuts": "快捷键",
+    "audioSource": "音频源",
+    "video": "视频",
+    "output": "输出",
+    "about": "关于",
+    "fps": "帧率",
+    "resolution": "分辨率",
+    "bitrate": "码率",
+    "codec": "编码",
+    "dir": "目录",
+    "save": "保存快捷键",
+    "saved": "✓ 已保存",
+    "loading": "加载中...",
+    "placeholderDir": "默认：桌面"
+  },
+  "shortcuts": {
+    "record": "录制",
+    "rewind3s": "后退3秒",
+    "rewind5s": "后退5秒",
+    "studio": "专注模式",
+    "magnifier": "放大镜",
+    "stepMarker": "步进标记",
+    "highlighter": "高亮笔",
+    "ripple": "涟漪",
+    "zoomCycle": "缩放切换",
+    "zoomLv1": "缩放1级",
+    "zoomLv2": "缩放2级",
+    "zoomLv3": "缩放3级"
+  },
+  "webcam": {
+    "title": "📷 摄像头"
+  },
+  "license": {
+    "title": "🔒 授权",
+    "pro": "⭐ 专业版",
+    "free": "免费版"
+  },
+  "intro": {
+    "title": "🎬 片头片尾",
+    "noFfmpeg": "未检测到 FFmpeg。安装后可启用片头片尾。",
+    "intro": "片头",
+    "outro": "片尾",
+    "duration": "时长",
+    "chooseFile": "选择文件..."
+  }
+}

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>简录 EaseRec</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: transparent; overflow: hidden; user-select: none;
+      font-family: "Segoe UI", system-ui, sans-serif; }
+    body { display: flex; align-items: center; justify-content: center; }
+    .panel {
+      width: 240px; border-radius: 14px; overflow: hidden;
+      background: rgba(20,22,30,0.94); backdrop-filter: blur(14px);
+      border: 1px solid rgba(255,255,255,0.14);
+      box-shadow: 0 10px 36px rgba(0,0,0,0.45);
+    }
+    .titlebar {
+      height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px 0 12px;
+      background: rgba(255,255,255,0.04); border-bottom: 1px solid rgba(255,255,255,0.08);
+      -webkit-app-region: drag; cursor: grab;
+    }
+    .titlebar .name { font-size: 11px; font-weight: 700; color: #cfd2e0; flex: 1; letter-spacing: 1px; }
+    .titlebar .dots { display: flex; gap: 6px; -webkit-app-region: no-drag; }
+    .titlebar button {
+      width: 20px; height: 20px; border-radius: 5px; border: none; cursor: pointer;
+      background: rgba(255,255,255,0.08); color: #aab; font-size: 10px; line-height: 1;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .titlebar button:hover { background: rgba(255,255,255,0.18); }
+    .titlebar button.close:hover { background: rgba(226,58,80,0.85); color: #fff; }
+    .main {
+      padding: 12px 14px 12px; display: flex; flex-direction: column; gap: 10px;
+    }
+    .recrow { display: flex; align-items: center; gap: 10px; }
+    .rec-btn {
+      -webkit-app-region: no-drag;
+      width: 44px; height: 44px; border-radius: 50%; cursor: pointer; border: 2px solid #6382ff;
+      background: rgba(99,130,255,0.16); display: flex; align-items: center; justify-content: center;
+      transition: all 0.2s; flex-shrink: 0;
+    }
+    .rec-btn:hover { background: rgba(99,130,255,0.3); }
+    .rec-btn .shape { width: 16px; height: 16px; border-radius: 50%; background: #6382ff; transition: all 0.2s; }
+    .rec-btn.recording { border-color: #ff4560; background: rgba(255,69,96,0.18); animation: recGlow 1.4s infinite; }
+    .rec-btn.recording .shape { border-radius: 4px; background: #ff4560; }
+    @keyframes recGlow {
+      0%,100% { box-shadow: 0 0 6px rgba(255,69,96,0.5); }
+      50% { box-shadow: 0 0 16px rgba(255,69,96,0.8); }
+    }
+    .status { flex: 1; min-width: 0; }
+    .status .state { font-size: 12px; font-weight: 700; color: #e8e8f0; }
+    .status .timer { font-size: 13px; color: #9aa; font-variant-numeric: tabular-nums; font-family: Consolas, monospace; }
+    .toggles { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+    .tgl {
+      -webkit-app-region: no-drag;
+      padding: 7px 4px; border-radius: 8px; cursor: pointer; font-size: 11px; color: #aab;
+      background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+      display: flex; flex-direction: column; align-items: center; gap: 3px; transition: all 0.15s;
+    }
+    .tgl:hover { background: rgba(255,255,255,0.1); }
+    .tgl .ico { font-size: 14px; }
+    .tgl.on { color: #fff; background: rgba(99,130,255,0.25); border-color: rgba(99,130,255,0.55); }
+    .tgl .sub { font-size: 9px; opacity: 0.8; }
+    .hint { font-size: 9px; color: #667; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <div class="titlebar">
+      <span class="name">🎬 简录 EaseRec</span>
+      <div class="dots">
+        <button id="minBtn" title="最小化（F1 可再唤出纯净舞台）">─</button>
+        <button id="closeBtn" class="close" title="退出纯净舞台">✕</button>
+      </div>
+    </div>
+    <div class="main">
+      <div class="recrow">
+        <button class="rec-btn" id="recBtn" title="开始/停止录制 (F9)"><div class="shape"></div></button>
+        <div class="status">
+          <div class="state" id="stateTxt">就绪</div>
+          <div class="timer" id="timer">00:00</div>
+        </div>
+      </div>
+      <div class="toggles">
+        <button class="tgl" id="srcBtn" title="选择录制的屏幕或窗口">
+          <span class="ico">🖥</span>画面源<span class="sub" id="srcSub">主屏</span>
+        </button>
+        <button class="tgl" id="audioBtn" title="录音：系统声 / 麦克风 / 全部">
+          <span class="ico">🔊</span>录音<span class="sub" id="audioSub">全部</span>
+        </button>
+        <button class="tgl" id="camBtn" title="开启 / 关闭摄像头画中画">
+          <span class="ico">🎥</span>摄像头<span class="sub" id="camSub">关</span>
+        </button>
+      </div>
+      <div class="hint">F9 录制 · F10 暂停 · F6 隐私遮挡 · 拖动标题移动</div>
+    </div>
+  </div>
+
+  <script>
+    const api = window.__directorcam;
+    const $ = (id) => document.getElementById(id);
+
+    function cmd(name, extra) {
+      if (api && typeof api.invoke === "function") {
+        api.invoke("mini_command", Object.assign({ cmd: name }, extra || {})).catch((e) => console.error(e));
+      }
+    }
+
+    $("recBtn").addEventListener("click", () => cmd("toggle-recording"));
+    $("srcBtn").addEventListener("click", () => cmd("open-source-picker"));
+    $("audioBtn").addEventListener("click", () => cmd("cycle-audio"));
+    $("camBtn").addEventListener("click", () => cmd("toggle-webcam"));
+    $("minBtn").addEventListener("click", () => cmd("minimize"));
+    $("closeBtn").addEventListener("click", () => cmd("close-studio"));
+
+    function fmt(ms) {
+      const s = Math.max(0, Math.floor(ms / 1000));
+      return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+    }
+
+    const AUDIO_LABELS = { system: "系统", mic: "麦克风", both: "全部" };
+
+    function applyState(st) {
+      if (!st) return;
+      $("recBtn").classList.toggle("recording", !!st.recording);
+      $("stateTxt").textContent = st.recording ? (st.paused ? "已暂停" : "录制中") : "就绪";
+      if (!st.recording) $("timer").textContent = "00:00";
+      $("audioSub").textContent = AUDIO_LABELS[st.audio] || "全部";
+      $("audioBtn").classList.toggle("on", st.audio !== "none");
+      $("camSub").textContent = st.webcam ? "开" : "关";
+      $("camBtn").classList.toggle("on", !!st.webcam);
+      $("srcSub").textContent = st.sourceName ? String(st.sourceName).slice(0, 4) : "主屏";
+    }
+
+    // State updates pushed from the main window via the main process.
+    if (api && typeof api.on === "function") {
+      api.on("mini-state", (p) => { try { applyState(p); } catch (e) { console.error(e); } });
+      api.on("mini-time", (p) => {
+        if (p && typeof p.elapsed_ms === "number") $("timer").textContent = fmt(p.elapsed_ms);
+      });
+    }
+    // Ask for the current state once on load.
+    cmd("query-state");
+  </script>
+</body>
+</html>

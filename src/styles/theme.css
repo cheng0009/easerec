@@ -1,0 +1,52 @@
+:root {
+  --bg-primary: #16130f;
+  --bg-secondary: #1e1a15;
+  --bg-tertiary: #282219;
+  --bg-glass: rgba(30, 26, 21, 0.85);
+  --border-subtle: rgba(255, 241, 224, 0.07);
+  --border-default: rgba(255, 241, 224, 0.12);
+  --border-accent: rgba(190, 90, 59, 0.32);
+  --text-primary: #ede7de;
+  --text-secondary: #a9a195;
+  --text-muted: #6d6559;
+  --accent: #be5a3b;
+  --accent-glow: rgba(190, 90, 59, 0.28);
+  --accent-danger: #e5544a;
+  --accent-success: #3fae83;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --font-mono: "JetBrains Mono", "Cascadia Code", "Fira Code", monospace;
+  --font-sans: "Inter", "Segoe UI", system-ui, sans-serif;
+
+  /* Stage / overlay surfaces (theme-aware) */
+  --stage-from: #1b1712;
+  --stage-to: #120f0b;
+  --badge-bg: rgba(20, 17, 13, 0.82);
+  --mask-bg: rgba(14, 11, 8, 0.72);
+  --chip-solid: #c9992a;
+}
+
+/* ---------- Light theme ---------- */
+[data-theme="light"] {
+  --bg-primary: #f7f4ef;
+  --bg-secondary: #fdfcf9;
+  --bg-tertiary: #ece9e1;
+  --bg-glass: rgba(253, 252, 249, 0.92);
+  --border-subtle: rgba(44, 38, 30, 0.08);
+  --border-default: rgba(44, 38, 30, 0.14);
+  --border-accent: rgba(168, 68, 43, 0.35);
+  --text-primary: #26211b;
+  --text-secondary: #5c5549;
+  --text-muted: #948c7f;
+  --accent: #a8442b;
+  --accent-glow: rgba(168, 68, 43, 0.20);
+  --accent-danger: #cc4032;
+  --accent-success: #2f8f68;
+
+  --stage-from: #f7f3ec;
+  --stage-to: #e9e3d7;
+  --badge-bg: rgba(253, 252, 249, 0.92);
+  --mask-bg: rgba(43, 37, 29, 0.40);
+  --chip-solid: #a87a10;
+}

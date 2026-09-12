@@ -1,0 +1,164 @@
+@import "./theme.css";
+
+*, *::before, *::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 3px;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+  border: none;
+  outline: none;
+  color: inherit;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes recFlashing {
+  0%, 100% { background: var(--accent-danger); box-shadow: 0 0 8px var(--accent-danger); }
+  50% { background: var(--accent-danger); opacity: 0.5; box-shadow: 0 0 2px var(--accent-danger); }
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(1.4); }
+}
+
+@keyframes breathe-system {
+  0%, 100% { box-shadow: 0 0 4px #46b39a, 0 0 8px #46b39a44; opacity: 1; }
+  50% { box-shadow: 0 0 12px #46b39a, 0 0 20px #46b39a88; opacity: 0.5; }
+}
+
+@keyframes breathe-mic {
+  0%, 100% { box-shadow: 0 0 4px #e09a46, 0 0 8px #e09a4644; opacity: 1; }
+  50% { box-shadow: 0 0 12px #e09a46, 0 0 20px #e09a4688; opacity: 0.5; }
+}
+
+.audio-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+}
+
+.audio-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.audio-dot-system {
+  background: #46b39a;
+  animation: breathe-system 1.4s ease-in-out infinite;
+}
+
+.audio-dot-mic {
+  background: #e09a46;
+  animation: breathe-mic 1.6s ease-in-out infinite;
+}
+
+.audio-dot-both-sys {
+  background: #46b39a;
+  animation: breathe-system 1.4s ease-in-out infinite 0s;
+}
+
+.audio-dot-both-mic {
+  background: #e09a46;
+  animation: breathe-mic 1.6s ease-in-out infinite 0.2s;
+}
+
+.recording-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  border: 4px solid var(--accent-danger);
+  border-radius: 0;
+  pointer-events: none;
+  z-index: 9999;
+  animation: recBorderPulse 1.5s infinite;
+}
+
+@keyframes recBorderPulse {
+  0%, 100% { border-color: rgba(255,60,60,0.8); box-shadow: inset 0 0 40px rgba(255,0,0,0.06); }
+  50% { border-color: rgba(255,60,60,0.2); box-shadow: inset 0 0 10px rgba(255,0,0,0.02); }
+}
+
+.studio-overlay {
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(22, 19, 15, 0.85);
+  pointer-events: none;
+  z-index: 9998;
+  display: flex; align-items: center; justify-content: center;
+}
+
+.studio-overlay-label {
+  color: rgba(255, 246, 235, 0.3);
+  font-size: 48px;
+  font-weight: 700;
+  letter-spacing: 8px;
+  text-transform: uppercase;
+}
+
+@keyframes chipPop {
+  0% { transform: scale(0.4); opacity: 0; }
+  70% { transform: scale(1.12); opacity: 1; }
+  100% { transform: scale(1); opacity: 0.92; }
+}
+
+@keyframes exportBreath {
+  0%, 100% { box-shadow: 0 0 6px var(--accent-glow); }
+  50% { box-shadow: 0 0 18px var(--accent-glow); }
+}
+
+@keyframes slideIn {
+  from { transform: translateX(30px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes bannerGrow {
+  0% { transform: scale(0.15); opacity: 0; }
+  65% { transform: scale(1.05); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+/* Idle control bar buttons — hover lift for clearer clickability. */
+.idc-btn {
+  transition: transform 0.12s ease, border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+.idc-btn:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow), 0 3px 10px rgba(0, 0, 0, 0.35);
+}
+.idc-btn:active {
+  transform: translateY(0);
+}
+

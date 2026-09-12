@@ -1,0 +1,58 @@
+{
+  "name": "easerec",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "npm run build:electron && node scripts/dev.mjs",
+    "build": "vite build",
+    "build:electron": "node scripts/build-electron.mjs",
+    "build:electron:watch": "node scripts/build-electron.mjs --watch",
+    "start": "electron .",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "dist:win": "npm run build && npm run build:electron && electron-builder --win"
+  },
+  "dependencies": {
+    "electron": "^44.2.0",
+    "i18next": "^26.3.6",
+    "i18next-browser-languagedetector": "^8.2.1",
+    "koffi": "^3.2.1",
+    "mp4-muxer": "^5.2.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-i18next": "^17.0.9",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "esbuild": "^0.25.0",
+    "typescript": "~5.6.0",
+    "vite": "^6.0.0",
+    "vitest": "^5.0.0"
+  },
+  "productName": "简录 EaseRec",
+  "build": {
+    "appId": "com.directorcam.app",
+    "productName": "简录 EaseRec",
+    "icon": "build/icon.ico",
+    "directories": { "output": "release" },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "src-tauri/**",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+  }
+}

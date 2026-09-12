@@ -1,0 +1,71 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ---- Build outputs ----
+dist-electron
+build
+*.tsbuildinfo
+
+# ---- Rust / Tauri build artifacts ----
+src-tauri/target
+src-tauri/gen
+
+# ---- Large bundled binaries (fetch via scripts/download-ffmpeg.ps1 & scripts/download-whisper.ps1) ----
+src-tauri/ffmpeg.exe
+src-tauri/ffprobe.exe
+src-tauri/whisper/
+src-tauri/recordings/
+
+# ---- Local secrets / sensitive files ----
+假设这是密钥.txt
+.env
+.env.*
+settings.json
+*.pem
+*.key
+
+# ---- Local backups / scratch / dev artifacts ----
+backup_*
+Recordly_clone/
+recordly_ref/
+/err*.txt
+/out*.txt
+/patch*.txt
+/dev_output*.txt
+/dev_error.txt
+/*_list.txt
+/test_e2e.log
+/apply_patch1.ps1
+/cleanup.py
+/fix_*.py
+/fix_*.ps1
+/test_*.ps1
+/z_*.png
+/test_screenshot.png
+/banner.png
+/npm
+/tauri
+/out
+/directorcam@0.1.0

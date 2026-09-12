@@ -1,0 +1,135 @@
+{
+  "app": {
+    "title": "简录 EaseRec",
+    "version": "v0.2",
+    "tagline": "Recording, simplified"
+  },
+  "studio": {
+    "title": "🔕 Focus Mode",
+    "enable": "Off",
+    "enabled": "ON — Notifications blocked",
+    "hint": "F1 toggles. Hides taskbar, blocks notifications."
+  },
+  "effects": {
+    "title": "✨ Live Effects",
+    "magnifier": "🔍 Magnifier",
+    "highlighter": "🖍 Highlighter",
+    "stepMarker": "①②③ Step Marker",
+    "ripple": "💧 Ripple",
+    "stepHint": "While on, each mouse click places the next marker (ESC to exit)",
+    "escHint": "ESC exits"
+  },
+  "control": {
+    "record": "⏺ Record",
+    "stop": "⬛ Stop",
+    "rewind3s": "⏪ 3s",
+    "rewind5s": "⏪ 5s",
+    "starting": "Starting in",
+    "hint": "F2/F3 Rewind · F9 Rec · Alt+Q/W/E/R Effects"
+  },
+  "preview": {
+    "placeholder": "Preview will appear when recording starts"
+  },
+  "timeline": {
+    "title": "⏱ Timeline",
+    "empty": "No marks yet — F2/F3 rewind, F4 fast-forward, F6 privacy while recording",
+    "hintRecording": "Marks made while recording appear here"
+  },
+  "export": {
+    "title": "📦 Export",
+    "silenceTrim": "Silence Trim",
+    "subtitles": "Burn Subtitles",
+    "outputDir": "Output Folder",
+    "outputPlaceholder": "Default: Desktop",
+    "exportBtn": "🎬 Export Video",
+    "processing": "Exporting…",
+    "pickFolder": "Select Output Folder",
+    "openFolder": "Open Folder",
+    "subtitleStyle": "Subtitle Style",
+    "fontFamily": "Font",
+    "fontSize": "Size",
+    "color": "Color",
+    "outline": "Outline",
+    "position": "Position",
+    "posBottom": "Bottom",
+    "posMiddle": "Middle",
+    "posTop": "Top",
+    "marginV": "Margin",
+    "llm": "LLM Online Correction",
+    "llmHint": "Fixes typos/homophones; timestamps untouched, falls back to local result on failure",
+    "baseUrl": "Base URL",
+    "apiKey": "API Key",
+    "model": "Model",
+    "glossary": "Hot Words (one per line)",
+    "asrLanguage": "ASR Language",
+    "loudnorm": "Loudness Normalize (EBU R128)",
+    "vertical": "Also export vertical 9:16",
+    "grace": "Privacy grace window (s)",
+    "ffTarget": "Fast-forward target (s)",
+    "recovery": "Previous recording did not finish cleanly",
+    "recoverOpen": "Open Folder",
+    "recoverIgnore": "Handled, dismiss",
+    "whisperMissing": "whisper-cli not found — run scripts/download-whisper.ps1"
+  },
+  "status": {
+    "rec": "REC",
+    "idle": "Idle",
+    "fps": "FPS",
+    "cpu": "CPU",
+    "audioSystem": "🔊 System",
+    "audioMic": "🎤 Mic",
+    "audioBoth": "🔊🎤 Both"
+  },
+  "language": {
+    "label": "Language",
+    "zh": "简体中文",
+    "en": "English"
+  },
+  "settings": {
+    "title": "⚙ Settings",
+    "shortcuts": "Shortcuts",
+    "audioSource": "Audio Source",
+    "video": "Video",
+    "output": "Output",
+    "about": "About",
+    "fps": "FPS",
+    "resolution": "Resolution",
+    "bitrate": "Bitrate",
+    "codec": "Codec",
+    "dir": "Dir",
+    "save": "Save Shortcuts",
+    "saved": "✓ Saved",
+    "loading": "Loading...",
+    "placeholderDir": "Default: Desktop"
+  },
+  "shortcuts": {
+    "record": "Record",
+    "rewind3s": "Rewind 3s",
+    "rewind5s": "Rewind 5s",
+    "studio": "Studio",
+    "magnifier": "Magnifier",
+    "stepMarker": "Step Marker",
+    "highlighter": "Highlighter",
+    "ripple": "Ripple",
+    "zoomCycle": "Zoom",
+    "zoomLv1": "Zoom L1",
+    "zoomLv2": "Zoom L2",
+    "zoomLv3": "Zoom L3"
+  },
+  "webcam": {
+    "title": "📷 Webcam"
+  },
+  "license": {
+    "title": "🔒 License",
+    "pro": "⭐ Pro",
+    "free": "Free"
+  },
+  "intro": {
+    "title": "🎬 Intro/Outro",
+    "noFfmpeg": "FFmpeg not detected. Install to enable.",
+    "intro": "Intro",
+    "outro": "Outro",
+    "duration": "Duration",
+    "chooseFile": "Choose file..."
+  }
+}

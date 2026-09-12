@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>简录 EaseRec</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: transparent; overflow: hidden; user-select: none; }
+    body {
+      display: flex; align-items: center; justify-content: center;
+      font-family: "Segoe UI", system-ui, sans-serif;
+    }
+    .mini-window {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 18px; border-radius: 12px;
+      background: rgba(20,20,30,0.92); backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+      -webkit-app-region: drag; cursor: grab;
+      transition: all 0.3s;
+    }
+    .mini-window.countdown {
+      gap: 0; padding: 20px 32px; border-radius: 50%;
+      background: rgba(20,20,30,0.85);
+      min-width: 100px; min-height: 100px;
+      justify-content: center;
+    }
+    .countdown-number {
+      font-size: 56px; font-weight: 800; color: #fff;
+      animation: countPop 0.7s ease-out;
+    }
+    @keyframes countPop {
+      0% { transform: scale(1.5); opacity: 0; }
+      50% { transform: scale(0.9); opacity: 1; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    .rec-dot {
+      width: 12px; height: 12px; border-radius: 50%;
+      background: #e74c3c;
+      animation: dotPulse 1.2s infinite;
+    }
+    @keyframes dotPulse {
+      0%,100% { opacity:1; transform:scale(1); }
+      50% { opacity:0.35; transform:scale(0.7); }
+    }
+    .timer { font-size:15px; font-weight:600; color:#eee; font-variant-numeric:tabular-nums; }
+    .info { font-size:11px; color:#888; }
+    .stop-btn {
+      -webkit-app-region:no-drag;
+      width:28px; height:28px; border-radius:50%;
+      background:rgba(231,76,60,0.25); border:1.5px solid rgba(231,76,60,0.6);
+      cursor:pointer; display:flex; align-items:center; justify-content:center;
+      transition:background 0.2s;
+    }
+    .stop-btn:hover { background:rgba(231,76,60,0.5); }
+    .stop-btn-inner { width:10px; height:10px; border-radius:2px; background:#e74c3c; }
+    .hidden { display:none !important; }
+  </style>
+</head>
+<body>
+  <div class="mini-window" id="miniWin">
+    <!-- Recording state -->
+    <div class="rec-dot" id="recDot"></div>
+    <span class="timer" id="timer">00:00:00</span>
+    <span class="info" id="info">Recording</span>
+    <div class="stop-btn" id="stopBtn" title="Stop (Esc)">
+      <div class="stop-btn-inner"></div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { listen } from "https://esm.sh/@tauri-apps/api/event";
+    import { getCurrentWindow } from "https://esm.sh/@tauri-apps/api/window";
+
+    const win = document.getElementById("miniWin");
+    const timerEl = document.getElementById("timer");
+    const infoEl = document.getElementById("info");
+    const recDot = document.getElementById("recDot");
+    const stopBtn = document.getElementById("stopBtn");
+
+    function fmt(ms) {
+      const s = Math.floor(ms/1000), m = Math.floor(s/60), h = Math.floor(m/60);
+      return `${h.toString().padStart(2,"0")}:${(m%60).toString().padStart(2,"0")}:${(s%60).toString().padStart(2,"0")}`;
+    }
+
+    function showRecording() {
+      win.classList.remove("countdown");
+      recDot.classList.remove("hidden");
+      timerEl.classList.remove("hidden");
+      infoEl.classList.remove("hidden");
+      stopBtn.classList.remove("hidden");
+      // Remove countdown number if present
+      const cd = win.querySelector(".countdown-number");
+      if (cd) cd.remove();
+    }
+
+    async function showCountdown(num) {
+      win.classList.add("countdown");
+      recDot.classList.add("hidden");
+      timerEl.classList.add("hidden");
+      infoEl.classList.add("hidden");
+      stopBtn.classList.add("hidden");
+
+      const old = win.querySelector(".countdown-number");
+      if (old) old.remove();
+      const el = document.createElement("span");
+      el.className = "countdown-number";
+      el.textContent = num;
+      win.appendChild(el);
+      // Re-trigger animation
+      el.style.animation = "none";
+      el.offsetHeight;
+      el.style.animation = "";
+    }
+
+    listen("countdown-tick", async (e) => {
+      const n = e.payload.num;
+      if (n > 0) {
+        await showCountdown(n);
+      } else {
+        showRecording();
+      }
+    });
+
+    listen("time-update", (e) => {
+      timerEl.textContent = fmt(e.payload.elapsed_ms);
+    });
+
+    listen("recording-state", (e) => {
+      if (!e.payload.is_recording) {
+        getCurrentWindow().hide();
+      }
+    });
+
+    stopBtn.addEventListener("click", async () => {
+      const { invoke } = await import("https://esm.sh/@tauri-apps/api/core");
+      await invoke("stop_recording");
+    });
+  </script>
+</body>
+</html>

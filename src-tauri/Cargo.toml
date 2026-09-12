@@ -1,0 +1,73 @@
+[package]
+name = "directorcam"
+version = "0.1.0"
+description = "DirectorCam - Real-time Screen Recording Director Console"
+authors = ["DirectorCam Team"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+parking_lot = "0.12"
+tokio = { version = "1", features = ["full"] }
+crossbeam = { version = "0.8", features = ["crossbeam-channel"] }
+base64 = "0.22"
+regex = { version = "1", default-features = false, features = ["std", "perf"] }
+dirs-next = "2"
+rand = "0.8"
+windows-numerics = "0.2"
+
+rayon = "1.10"
+nokhwa = { version = "0.10.11", features = ["input-msmf"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Imaging",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_Graphics_Gdi",
+    "Win32_Media",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_Media_MediaFoundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Threading",
+    "Win32_System_Power",
+    "Win32_Foundation", "Win32_UI_Magnification",] }
+
+[features]
+
+store-build = []
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true
+panic = "abort"

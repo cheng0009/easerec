@@ -1,0 +1,67 @@
+{
+    "$schema":  "../node_modules/@tauri-apps/cli/config.schema.json",
+    "productName":  "DirectorCam",
+    "version":  "0.1.0",
+    "identifier":  "com.directorcam.app",
+    "build":  {
+                  "frontendDist":  "../dist",
+                  "devUrl":  "http://localhost:5173",
+                  "beforeDevCommand":  "npm run dev",
+                  "beforeBuildCommand":  "npm run build"
+              },
+    "app":  {
+                "windows":  [
+                                {
+                                    "title":  "DirectorCam",
+                                    "width":  1280,
+                                    "height":  800,
+                                    "minWidth":  960,
+                                    "minHeight":  600,
+                                    "resizable":  true,
+                                    "fullscreen":  false,
+                                    "center":  true,
+                                    "decorations":  true
+                                },
+                                {
+                                    "decorations":  false,
+                                    "alwaysOnTop":  true,
+                                    "shadow":  false,
+                                    "width":  240,
+                                    "transparent":  true,
+                                    "visible":  false,
+                                    "title":  "DirectorCam",
+                                    "url":  "/mini.html",
+                                    "center":  true,
+                                    "height":  60,
+                                    "skipTaskbar":  true,
+                                    "label":  "mini",
+                                    "resizable":  false
+                                }
+                            ],
+                "security":  {
+                                 "csp":  null
+                             }
+            },
+    "bundle":  {
+                   "active":  true,
+                   "category":  "Utilities",
+                   "shortDescription":  "Real-time screen recording with effects \u0026 GPU encoding",
+                   "longDescription":  "DirectorCam - Professional screen recording with real-time effects, studio mode, webcam overlay, and hardware-accelerated encoding.",
+                   "publisher":  "DirectorCam",
+                   "icon":  [
+                                "icons/32x32.png",
+                                "icons/128x128.png",
+                                "icons/128x128@2x.png",
+                                "icons/icon.icns",
+                                "icons/icon.ico"
+                            ],
+                   "targets":  [
+                                   "msi"
+                               ],
+                   "windows":  {
+                                   "wix":  {
+                                               "language":  "zh-CN"
+                                           }
+                               }
+               }
+}
