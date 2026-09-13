@@ -86,6 +86,7 @@ export async function togglePrivacyCut(): Promise<void> {
   if (st.marks.activePrivacyCut) {
     const start = st.marks.activePrivacyCut.startMs;
     const end = nowMs();
+    try { await dcInvoke("overlay_privacy_cut", { on: false }); } catch { /* ignore */ }
     if (end - start >= 200) {
       await appendEdit({ type: "cut", startMs: start, endMs: end, reason: "privacy" });
       feedback(isZhLang() ? `🔒 隐私区间已标记（${((end - start) / 1000).toFixed(1)} 秒，导出时剪除）` : `🔒 Privacy range marked (${((end - start) / 1000).toFixed(1)}s, cut at export)`);
@@ -94,8 +95,9 @@ export async function togglePrivacyCut(): Promise<void> {
     }
     st.setMarks({ activePrivacyCut: null });
   } else {
+    try { await dcInvoke("overlay_privacy_cut", { on: true }); } catch { /* ignore */ }
     st.setMarks({ activePrivacyCut: { startMs: nowMs() } });
-    feedback(isZhLang() ? "🔴 隐私标记中 — 再次按下结束（此提示不会被录进视频）" : "🔴 Privacy marking — press again to end (never recorded)");
+    feedback(isZhLang() ? "🔴 隐私剪辑中 — 屏幕上方有红色提示，再次按 Shift+F6 结束" : "🔴 Privacy cutting — red banner on screen, press Shift+F6 again to end");
   }
 }
 
@@ -318,6 +320,9 @@ export function closeOpenMarksOnStop(): void {
   }
   if (st.marks.privacyDrawing) {
     void dcInvoke("overlay_privacy_draw", { on: false }).catch(() => {});
+  }
+  if (st.marks.activePrivacyCut) {
+    void dcInvoke("overlay_privacy_cut", { on: false }).catch(() => {});
   }
   if (st.marks.activeFF) getDirector().recorder.setFFMode(false);
   st.setMarks({

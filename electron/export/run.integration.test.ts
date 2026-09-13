@@ -13,9 +13,10 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { runExportPipeline, type RunContext } from "./run";
-import type { ExportSettings } from "./plan";
+import { execFfmpeg, runExportPipeline, type RunContext } from "./run";
+import { planExport, type ExportSettings } from "./plan";
 import { appendEdit, emptyEdl, type CutEdit, type EdlFile, type SpeedupEdit } from "../../src/recording/edl";
+import type { OccurrenceRun } from "../../src/lib/perceptualHash";
 import { parseMouseTrack, replayCamera, downsampleCamera, buildZoompanGraph } from "../../src/recording/focusZoom";
 
 const FFMPEG = path.resolve(__dirname, "..", "..", "src-tauri", "ffmpeg.exe");
@@ -266,6 +267,58 @@ describe.runIf(hasFfmpeg)("export pipeline (real ffmpeg)", () => {
     expect(dur).toBeGreaterThan(5.6);
     expect(dur).toBeLessThan(6.5);
   }, 180000);
+
+  it("a privacy burn with ~1500 occurrence rects is chunked so no command hits the OS limit", async () => {
+    // Regression for `spawn ENAMETOOLONG`: a long recording whose masked
+    // content blinks in/out at many positions builds a -filter_complex graph
+    // far beyond Windows' 32767-char command-line cap. The planner must chunk
+    // the rects into chained burn passes kept well under the limit.
+    const input = path.join(dir, "mosaic_lim.mp4");
+    const output = path.join(dir, "mosaic_lim_out.mp4");
+    generateInput(input, 4);
+    const edl = appendEdit(emptyEdl(), { type: "mask", startMs: 500, endMs: 800, region: { x: 0.5, y: 0.5, w: 0.1, h: 0.1 }, style: "black", muteAudio: false, startSource: "match", pending: false });
+    // Distinct layout cells -> distinct rects that survive coalescing, so the
+    // graph stays huge even after same-spot runs are merged.
+    const N = Number(process.env["BURN_PROBE_N"] ?? 24);
+    const runs: OccurrenceRun[] = [];
+    for (let i = 0; i < N; i++) {
+      runs.push({
+        t0: 900 + i * 1.25,
+        t1: 900 + i * 1.25 + 0.4,
+        rect: { x: (i % 50) / 50, y: Math.floor(i / 50) / 30, w: 0.08, h: 0.08 },
+      });
+    }
+    const plan = planExport({
+      inputPath: input, outputPath: output, workDir: dir,
+      edl, durationMs: 4000, settings: baseSettings(),
+      maskTracks: [runs],
+    });
+    const burns = plan.stages.filter((s) => s.kind === "maskburn");
+    if (N < 400) { /* single pass expected */ } else { expect(burns.length).toBeGreaterThan(1); }
+    console.log(`[chunk] plan produced ${burns.length} burn passes`);
+    // Each pass's graph must stay comfortably inside the command-line budget.
+    for (const b of burns) {
+      const g = b.args![b.args!.indexOf("-filter_complex") + 1];
+      console.log(`[chunk] pass graph=${g.length} chars rects=${(g.match(/split=/g) || []).length}`);
+      expect(g.length).toBeLessThan(30000);
+    }
+    // Run the chained passes end-to-end against the real ffmpeg.
+    for (let bi = 0; bi < burns.length; bi++) {
+      const b = burns[bi];
+      writeFileSync(path.join(tmpdir(), "opencode", "burn_probe", `burn_args_${bi}.json`), JSON.stringify(b.args));
+      const res = await execFfmpeg(FFMPEG, b.args!);
+      expect(res.ok, res.tail).toBe(true);
+      // The last chained pass must produce a real file (the final "output" is
+      // moved into place by a later transcode stage this test does not run).
+      const passOut = b.args![b.args!.length - 1];
+      expect(existsSync(passOut), `pass output missing: ${passOut}`).toBe(true);
+    }
+    // The last chained pass carries the final masked video (the end-of-plan
+    // stream-copy stage that would move it to `output` is not run here).
+    const lastPassOut = burns[burns.length - 1].args![burns[burns.length - 1].args!.length - 1];
+    expect(existsSync(lastPassOut), `last pass output missing: ${lastPassOut}`).toBe(true);
+    expect(burns.some((b) => b.args!.some((a) => a.length > 40000))).toBe(false);
+  }, 600000);
 });
 
 describe.runIf(hasFfmpeg)("focus pass (real ffmpeg zoompan)", () => {
@@ -384,3 +437,4 @@ describe.runIf(hasFfmpeg)("brand outro (real ffmpeg)", () => {
     expect(dur).toBeLessThan(8.2);
   }, 180000);
 });
+

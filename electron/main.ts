@@ -282,6 +282,7 @@ function applyOverlayMouseMode(): void {
 // silently dropping the draw-mode activation).
 let overlayFFOn = false;
 let overlayPrivacyDrawOn = false;
+let overlayPrivacyCutOn = false;
 let overlayPrivacyBoxRect: { x: number; y: number; w: number; h: number } | null = null;
 let overlayPrivacyHint = "";
 
@@ -330,6 +331,7 @@ function ensureOverlayWindow(): BrowserWindow | null {
     // first privacy draw) reflects it instead of starting blank.
     pushOverlay("ov-ff", { on: overlayFFOn });
     pushOverlay("ov-privacy-draw", { on: overlayPrivacyDrawOn, hint: overlayPrivacyHint });
+    pushOverlay("ov-privacy-cut", { on: overlayPrivacyCutOn });
     pushOverlay("ov-privacy-box", { rect: overlayPrivacyBoxRect });
   });
   overlayWindow = win;
@@ -364,9 +366,11 @@ function showOverlay(visible: boolean): void {
 function resetOverlayPrivacyState(): void {
   overlayShield = false;
   overlayPrivacyDrawOn = false;
+  overlayPrivacyCutOn = false;
   overlayPrivacyBoxRect = null;
   applyOverlayMouseMode();
   pushOverlay("ov-privacy-draw", { on: false });
+  pushOverlay("ov-privacy-cut", { on: false });
   pushOverlay("ov-privacy-box", { rect: null });
 }
 
@@ -632,7 +636,7 @@ function registerIpc(): void {
     pushOverlay("ov-frame", p);
   });
   ipcMain.on("dc-overlay-clear", () => {
-    showOverlay(!(overlayFFOn || overlayPrivacyDrawOn || !!overlayPrivacyBoxRect));
+    showOverlay(!(overlayFFOn || overlayPrivacyDrawOn || overlayPrivacyCutOn || !!overlayPrivacyBoxRect));
     pushOverlay("ov-clear", null);
   });
 
@@ -1046,6 +1050,12 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>): Promise
       overlayPrivacyBoxRect = (args.rect as { x: number; y: number; w: number; h: number } | null) ?? null;
       if (overlayPrivacyBoxRect) showOverlay(true);
       pushOverlay("ov-privacy-box", { rect: overlayPrivacyBoxRect });
+      return true;
+    case "overlay_privacy_cut":
+      overlayPrivacyCutOn = !!args.on;
+      if (overlayPrivacyCutOn) showOverlay(true);
+      pushOverlay("ov-privacy-cut", { on: overlayPrivacyCutOn });
+      console.log(`[directorcam] privacy cut ${overlayPrivacyCutOn ? "ON" : "off"}`);
       return true;
     // From the OVERLAY window: a mask rectangle was dragged.
     case "privacy_region_selected": {

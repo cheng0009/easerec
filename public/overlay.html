@@ -138,6 +138,8 @@
     let privacyBoxStartMs = 0; // wall-clock when the current mask box appeared (drives the HUD timer)
     let drawState = { on: false, mode: "privacy", dragging: false, x0: 0, y0: 0, x1: 0, y1: 0 };
     let drawHint = "";
+    let privacyCut = { on: false };
+    let privacyCutStartMs = 0; // wall-clock when the privacy-cut range opened (drives the HUD timer)
 
     // Reusable off-screen canvas for the lens pixels.
     let lensCanvas = null;
@@ -175,7 +177,7 @@
       penStrokes = [];
       penDrawing = false;
       penLastPt = null;
-      if (ff.on || privacyBoxes.length > 0 || drawState.on) {
+      if (ff.on || privacyBoxes.length > 0 || drawState.on || privacyCut.on) {
         // Persistent mark visuals survive the effects-clear (they must stay
         // on screen and in the recording until their own end signal).
         draw();
@@ -510,6 +512,33 @@
         g.shadowBlur = 0;
       }
 
+      // Privacy whole-cut (Shift+F6): red top banner while a cut range is open.
+      // The range is removed at export, so the banner is never in the film.
+      if (privacyCut.on) {
+        const secs = Math.max(0, (Date.now() - privacyCutStartMs) / 1000);
+        const m = Math.floor(secs / 60);
+        const s = Math.floor(secs % 60);
+        const label = "\uD83D\uDEE1\uFE0F \u9690\u79C1\u526A\u8F91\u4E2D " + m + ":" + String(s).padStart(2, "0") + " \u00B7 SHIFT+F6 \u7ED3\u675F";
+        g.font = "bold " + Math.round(Math.max(15, W * 0.015)) + "px system-ui, sans-serif";
+        const tw = g.measureText(label).width;
+        const pad = 12;
+        const pillW = tw + pad * 2;
+        const pillH = Math.max(28, W * 0.022);
+        const px = W / 2 - pillW / 2;
+        const py = Math.round(H * 0.03);
+        g.fillStyle = "rgba(24,10,12,0.85)";
+        g.beginPath();
+        if (g.roundRect) g.roundRect(px, py, pillW, pillH, 8); else g.rect(px, py, pillW, pillH);
+        g.fill();
+        g.strokeStyle = "rgba(230,60,60,0.9)";
+        g.lineWidth = 1.5;
+        g.stroke();
+        g.fillStyle = "#ff8a7a";
+        g.textAlign = "center";
+        g.textBaseline = "middle";
+        g.fillText(label, px + pillW / 2, py + pillH / 2 + 1);
+      }
+
       // Privacy draw mode: veil + hint + current drag rectangle.
       if (drawState.on) {
         g.fillStyle = "rgba(0,0,20,0.18)";
@@ -540,7 +569,7 @@
     }
 
     function draw() {
-      const hasPersistent = ff.on || privacyBoxes.length > 0 || drawState.on;
+      const hasPersistent = ff.on || privacyBoxes.length > 0 || drawState.on || privacyCut.on;
       if (!frame && !hasPersistent) return;
       const g = scene.getContext("2d");
       setSceneSize(g);
@@ -562,7 +591,7 @@
       if (persistentRaf) return;
       persistentRaf = requestAnimationFrame(function loop() {
         persistentRaf = null;
-        if (ff.on || privacyBoxes.length > 0 || drawState.on) {
+        if (ff.on || privacyBoxes.length > 0 || drawState.on || privacyCut.on) {
           draw();
           ensurePersistentLoop();
         }
@@ -649,6 +678,15 @@
           privacyBoxes = (p && p.rect) ? [p.rect] : [];
           privacyBoxStartMs = privacyBoxes.length ? (privacyBoxStartMs || Date.now()) : 0;
           if (privacyBoxes.length) ensurePersistentLoop();
+          draw();
+        } catch (e) { console.error(e); }
+      });
+      api.on("ov-privacy-cut", (p) => {
+        try {
+          const on = !!(p && p.on);
+          if (on && !privacyCut.on) privacyCutStartMs = Date.now();
+          privacyCut.on = on;
+          if (on) ensurePersistentLoop();
           draw();
         } catch (e) { console.error(e); }
       });

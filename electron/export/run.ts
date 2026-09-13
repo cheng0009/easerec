@@ -47,7 +47,7 @@ export interface RunExportRequest {
   ctx: RunContext;
 }
 
-function execFfmpeg(ffmpegPath: string, args: string[], onLog?: (line: string) => void, cwd?: string, timeoutMs = 60 * 60 * 1000): Promise<{ ok: boolean; tail: string }> {
+export function execFfmpeg(ffmpegPath: string, args: string[], onLog?: (line: string) => void, cwd?: string, timeoutMs = 60 * 60 * 1000): Promise<{ ok: boolean; tail: string }> {
   return new Promise((resolve) => {
     let tail = "";
     let child;

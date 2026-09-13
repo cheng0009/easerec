@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   bitrateFor,
   burnStage,
+  coalesceBurnRects,
   concatArgs,
   concatListContent,
   extractWavStage,
@@ -332,6 +333,71 @@ it("masks before slicing so cuts keep the mosaic on the kept footage", () => {
     const f = filterOf(plan.stages[0].args!);
     expect(f).toContain("[o0]split=2[s1][t1]");
     expect(f).toContain("enable='between(t,8.000,60.000)'[vout]");
+  });
+});
+
+describe("coalesceBurnRects", () => {
+  const r = (x: number, y: number, t0: number, t1: number): Parameters<typeof coalesceBurnRects>[0][number] =>
+    ({ x, y, w: 0.2, h: 0.1, t0, t1 });
+
+  it("merges same-spot blink runs into one continuous window", () => {
+    const out = coalesceBurnRects([
+      r(0.5, 0.5, 1.0, 2.0),
+      r(0.5, 0.5, 3.5, 4.0),  // gap 1.5s (>0.5 tolerance) -> new span
+      r(0.5, 0.5, 4.2, 6.0),  // overlaps previous -> same span
+      r(0.5, 0.5, 6.1, 6.5),  // within +0.5s tolerance -> merges with [3.5,6]
+    ]);
+    expect(out).toHaveLength(2);
+    expect(out[0].t0).toBe(1.0);
+    expect(out[0].t1).toBe(2.0);
+    expect(out[1].t0).toBe(3.5);
+    expect(out[1].t1).toBe(6.5);
+  });
+
+  it("keeps different spots separate", () => {
+    const out = coalesceBurnRects([
+      r(0.5, 0.5, 1.0, 2.0),
+      r(0.1, 0.8, 1.0, 2.0),
+      r(0.1, 0.8, 2.5, 3.0),  // merges with the second spot
+    ]);
+    expect(out).toHaveLength(2);
+    expect(out.find((m) => m.x === 0.5)!.t1).toBe(2.0);
+    expect(out.find((m) => m.x === 0.1)!.t1).toBe(3.0);
+  });
+});
+
+describe("privacy mask burn chunking (Windows command-line cap)", () => {
+  it("splits a huge occurrence set into passes whose graphs stay under the budget", () => {
+    const edl = appendEdit(emptyEdl(), mask(500, 800, { x: 0.5, y: 0.5, w: 0.1, h: 0.1 }));
+    const runs: Array<{ t0: number; t1: number; rect: MaskRegion }> = [];
+    for (let i = 0; i < 1500; i++) {
+      runs.push({
+        t0: 900 + i * 1.25,
+        t1: 900 + i * 1.25 + 0.4,
+        rect: { x: (i % 50) / 50, y: Math.floor(i / 50) / 30, w: 0.08, h: 0.08 },
+      });
+    }
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl, durationMs: 4000, settings: baseSettings(),
+      maskTracks: [runs],
+    });
+    const burns = plan.stages.filter((s) => s.kind === "maskburn");
+    expect(burns.length).toBeGreaterThan(1);
+    for (const b of burns) {
+      const g = b.args![b.args!.indexOf("-filter_complex") + 1];
+      expect(g.length).toBeLessThan(30000);
+    }
+    expect(plan.stages[plan.stages.length - 1].kind).toBe("transcode");
+  });
+
+  it("keeps a small mask set on a single pass", () => {
+    const edl = appendEdit(emptyEdl(), mask(500, 800));
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl, durationMs: 4000, settings: baseSettings(),
+    });
+    expect(plan.stages.filter((s) => s.kind === "maskburn")).toHaveLength(1);
   });
 });
 

@@ -159,6 +159,53 @@ export interface MaskBurnRect {
 }
 
 /**
+ * Collapse burn rects that sit on the SAME spot into continuous time spans.
+ * The occurrence scan emits one run per visible burst (gap-gated ~1s), so a
+ * mask whose content blinks in/out every few seconds yields thousands of
+ * near-identical overlay chains (one re-encode-sized overlay op per chain).
+ * Merging them into a single window from first to last appearance keeps the
+ * same coverage with a tiny fraction of the filters — and a sane command line.
+ */
+export function coalesceBurnRects(rects: MaskBurnRect[]): MaskBurnRect[] {
+  const cell = 32;
+  const grid = new Map<string, { x: number; y: number; w: number; h: number; ts: Array<[number, number]> }>();
+  for (const r of rects) {
+    const k = `${Math.round(r.x * cell)}|${Math.round(r.y * cell)}|${Math.round(r.w * cell)}|${Math.round(r.h * cell)}`;
+    let e = grid.get(k);
+    if (!e) { e = { x: r.x, y: r.y, w: r.w, h: r.h, ts: [] }; grid.set(k, e); }
+    e.ts.push([r.t0, r.t1]);
+  }
+  const out: MaskBurnRect[] = [];
+  for (const e of grid.values()) {
+    const ts = e.ts.sort((a, b) => a[0] - b[0]);
+    let i = 0;
+    while (i < ts.length) {
+      let c0 = ts[i][0];
+      let c1 = ts[i][1];
+      i++;
+      while (i < ts.length && ts[i][0] <= c1 + 0.5) {
+        c1 = Math.max(c1, ts[i][1]);
+        i++;
+      }
+      out.push({ x: e.x, y: e.y, w: e.w, h: e.h, t0: c0, t1: c1 });
+    }
+  }
+  return out;
+}
+
+function validBurnRect(m: MaskBurnRect): boolean {
+  return m.t1 > m.t0 + 0.001 &&
+    Number.isFinite(m.x) && Number.isFinite(m.y) && Number.isFinite(m.w) && Number.isFinite(m.h) &&
+    m.w > 0.01 && m.h > 0.01 && m.x >= -0.02 && m.y >= -0.02 && m.x < 1.02 && m.y < 1.02;
+}
+
+/** Max chars a single maskburn -filter_complex graph may use. Windows caps the
+ *  process command line at ~32767 chars (CreateProcess) and the bundled ffmpeg
+ *  has no script-file fallback, so oversized burns are split into chained
+ *  passes kept well under the cap. */
+export const BURN_PASS_BUDGET_CHARS = 24000;
+
+/**
  * Build the -filter_complex graph that pixelates each mask rect in place over
  * its source-timeline window. The mosaic is a real pixelation of whatever
  * sits underneath (downscale x12 area + upscale nearest-neighbor), so the
@@ -167,11 +214,7 @@ export interface MaskBurnRect {
  */
 export function maskBurnGraph(rects: MaskBurnRect[], inW: number, inH: number): string {
   const chains: string[] = [];
-  const usable = rects.filter(
-    (m) => m.t1 > m.t0 + 0.001 &&
-      Number.isFinite(m.x) && Number.isFinite(m.y) && Number.isFinite(m.w) && Number.isFinite(m.h) &&
-      m.w > 0.01 && m.h > 0.01 && m.x >= -0.02 && m.y >= -0.02 && m.x < 1.02 && m.y < 1.02,
-  );
+  const usable = coalesceBurnRects(rects.filter(validBurnRect));
   let last = "[0:v]";
   usable.forEach((m, i) => {
     let X = Math.round(m.x * inW);
@@ -710,11 +753,29 @@ export function planExport(input: PlanInput): ExportPlan {
         maskRecs.push({ x: rx, y: ry, w: rw, h: rh, t0: r0, t1: r1 });
       }
     });
-    if (maskBurnGraph(maskRecs, efW, efH).length > 2) {
-      const masked = path.join(workDir, "masked.mp4");
-      intermediates.push(masked);
-      stages.push(maskBurnStage(pipelineInput, masked, maskRecs, { inW: efW, inH: efH, fps }));
-      pipelineInput = masked;
+    const burnRects = coalesceBurnRects(maskRecs.filter(validBurnRect));
+    if (burnRects.length > 0) {
+      // A real burn can carry thousands of rects (content blinking in/out at
+      // many spots); each rect is ~176 chars of filtergraph and Windows caps
+      // the command line at ~32767 — so chunk the rects into chained passes
+      // whose graphs stay under BURN_PASS_BUDGET_CHARS. Extra re-encode passes
+      // cost time but guarantee the export can never die with ENAMETOOLONG.
+      const graphLen = maskBurnGraph(burnRects, efW, efH).length;
+      const passes = graphLen <= BURN_PASS_BUDGET_CHARS ? 1 : Math.ceil(graphLen / BURN_PASS_BUDGET_CHARS);
+      const perPass = Math.max(1, Math.ceil(burnRects.length / passes));
+      let src = pipelineInput;
+      for (let pi = 0, off = 0; off < burnRects.length; pi++, off += perPass) {
+        const chunk = burnRects.slice(off, off + perPass);
+        const masked = path.join(workDir, off + perPass >= burnRects.length ? "masked.mp4" : `masked_${pi}.mp4`);
+        const stage = maskBurnStage(src, masked, chunk, { inW: efW, inH: efH, fps });
+        stage.label = passes === 1
+          ? `burn ${chunk.length} privacy mosaic(s)`
+          : `burn ${chunk.length}/${burnRects.length} privacy mosaic(s)`;
+        intermediates.push(masked);
+        stages.push(stage);
+        src = masked;
+      }
+      pipelineInput = src;
     }
   }
 
