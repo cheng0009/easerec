@@ -90,13 +90,15 @@ export const useStore = create<AppStore>((set) => ({
     verticalExport: false,
     privacyGraceS: 8,
     ffTargetSecs: [3, 5],
-    brandOutro: true,
     introPath: "",
     introDurationS: 3,
     outroPath: "",
     outroDurationS: 3,
     successSound: true,
     ...loadSettingsFromStorage(),
+    // Brand outro is a fixed, non-user-editable feature (see ExportDrawer) —
+    // ignore any stale persisted value that would silently skip it.
+    brandOutro: true,
   },
   setSettings: (partial) => set((s) => ({ settings: { ...s.settings, ...partial } })),
 
