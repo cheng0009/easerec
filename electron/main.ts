@@ -37,7 +37,19 @@ import { resolveWhisper } from "./subtitles/whisper";
 
 // App icon: Windows uses the multi-size build/icon.ico (dev/runtime window +
 // taskbar); electron-builder embeds the same .ico into the packaged exe.
-const ICON_PATH = projectPath("build", "icon.ico");
+/** Resolve a bundled icon from the project (dev) or packaged resources. */
+function resolveIcon(name: string): string | undefined {
+  const candidates = [
+    projectPath("build", name),
+    process.resourcesPath ? path.join(process.resourcesPath, name) : "",
+  ];
+  for (const c of candidates) {
+    if (c && fs.existsSync(c)) return c;
+  }
+  return undefined;
+}
+const ICON_PATH = resolveIcon("icon.ico");
+const TRAY_ICON = resolveIcon("icon-256.png") || resolveIcon("icon.png");
 
 /** Enumerate installed Windows font family names via GDI+ (PowerShell). */
 async function listSystemFonts(): Promise<string[]> {
@@ -56,7 +68,7 @@ async function listSystemFonts(): Promise<string[]> {
     return [];
   }
 }
-const APP_ICON = process.platform === "win32" && fs.existsSync(ICON_PATH) ? ICON_PATH : undefined;
+const APP_ICON = process.platform === "win32" && ICON_PATH ? ICON_PATH : undefined;
 
 let mainWindow: BrowserWindow | null = null;
 let miniWindow: BrowserWindow | null = null;
@@ -222,9 +234,12 @@ function toggleMainWindow(): void {
  *  while "minimized to tray". */
 function ensureTray(): Tray | null {
   if (tray && !tray.isDestroyed()) return tray;
-  let img = nativeImage.createFromPath(ICON_PATH);
-  if (img.isEmpty()) img = nativeImage.createFromPath(projectPath("build", "icon-256.png"));
-  if (img.isEmpty()) return null;
+  let img = ICON_PATH ? nativeImage.createFromPath(ICON_PATH) : nativeImage.createEmpty();
+  if (img.isEmpty() && TRAY_ICON) img = nativeImage.createFromPath(TRAY_ICON);
+  if (img.isEmpty()) {
+    console.warn("[directorcam] tray icon not found — system tray disabled");
+    return null;
+  }
   let icon = img.resize({ width: 16, height: 16 });
   if (icon.isEmpty()) icon = img;
   tray = new Tray(icon);
@@ -529,7 +544,13 @@ function registerIpc(): void {
     if (!target) return;
     switch (data?.action) {
       case "minimize": target.minimize(); break;
-      case "unminimize": (target as unknown as { unminimize(): void }).unminimize(); break;
+      case "unminimize":
+        // The window may have been hidden (minimize → preventDefault + hide),
+        // in which case unminimize() alone is a no-op — always show + focus.
+        try { (target as unknown as { unminimize(): void }).unminimize(); } catch { /* ignore */ }
+        try { target.show(); } catch { /* ignore */ }
+        try { target.focus(); } catch { /* ignore */ }
+        break;
       case "hide": target.hide(); break;
       case "show": target.show(); break;
       case "focus": target.focus(); break;
@@ -1237,13 +1258,16 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
     .find((f) => fs.existsSync(f)) ?? "";
   const brandZh = config.brand_lang !== "en";
   // Brand logo: the bundled EaseRec mark is part of the outro design
-  // (dev: src/assets; packaged: src-tauri/brand). If missing, text-only card.
+  // (dev: src/assets; packaged: extraResources/brand). If missing, text-only card.
   const brandLogo = (() => {
     for (const cand of [
       projectPath("src-tauri", "brand", "easerec-logo.png"),
       projectPath("src", "assets", "easerec.png"),
+      process.resourcesPath
+        ? path.join(process.resourcesPath, "brand", "easerec-logo.png")
+        : "",
     ]) {
-      if (fs.existsSync(cand)) return cand;
+      if (cand && fs.existsSync(cand)) return cand;
     }
     return "";
   })();

@@ -1,7 +1,9 @@
 {
   "name": "easerec",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "description": "简录 EaseRec — 面向知识创作者的录屏导播台（录屏即成片）",
+  "author": "cheng0009",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
@@ -17,7 +19,6 @@
     "dist:win": "npm run build && npm run build:electron && electron-builder --win"
   },
   "dependencies": {
-    "electron": "^44.2.0",
     "i18next": "^26.3.6",
     "i18next-browser-languagedetector": "^8.2.1",
     "koffi": "^3.2.1",
@@ -32,6 +33,8 @@
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.0",
+    "electron": "^44.2.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
     "typescript": "~5.6.0",
     "vite": "^6.0.0",
@@ -42,17 +45,37 @@
     "appId": "com.directorcam.app",
     "productName": "简录 EaseRec",
     "icon": "build/icon.ico",
-    "directories": { "output": "release" },
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "dist/**",
       "dist-electron/**",
-      "src-tauri/**",
-      "package.json"
+      "package.json",
+      "node_modules/koffi/**",
+      "node_modules/@koromix/koffi-win32-x64/**"
+    ],
+    "extraResources": [
+      { "from": "build/icon.ico", "to": "icon.ico" },
+      { "from": "build/icon-256.png", "to": "icon-256.png" },
+      { "from": "build/icon.png", "to": "icon.png" },
+      { "from": "src-tauri/ffmpeg.exe", "to": "ffmpeg.exe" },
+      { "from": "src-tauri/brand", "to": "brand" },
+      {
+        "from": "src-tauri/whisper",
+        "to": "whisper",
+        "filter": ["whisper-cli.exe", "*.dll", "models/ggml-base.bin"]
+      }
     ],
     "win": {
       "target": "nsis",
-      "icon": "build/icon.ico"
+      "icon": "build/icon.ico",
+      "artifactName": "EaseRec-${version}-Setup.${ext}"
     },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    }
   }
 }

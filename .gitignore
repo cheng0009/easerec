@@ -25,7 +25,7 @@ dist-ssr
 
 # ---- Build outputs ----
 dist-electron
-build
+release
 *.tsbuildinfo
 
 # ---- Rust / Tauri build artifacts ----

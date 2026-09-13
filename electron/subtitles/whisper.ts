@@ -40,8 +40,16 @@ export const WHISPER_MODELS = ["tiny", "base", "small", "medium"] as const;
 export type WhisperModel = (typeof WHISPER_MODELS)[number];
 
 export function defaultModelPath(projectDir: string, model: WhisperModel = "base"): string | null {
-  const p = path.join(projectDir, "src-tauri", "whisper", "models", `ggml-${model}.bin`);
-  return fs.existsSync(p) ? p : null;
+  const candidates = [
+    path.join(projectDir, "src-tauri", "whisper", "models", `ggml-${model}.bin`),
+    process.resourcesPath
+      ? path.join(process.resourcesPath, "whisper", "models", `ggml-${model}.bin`)
+      : "",
+  ].filter((p) => p && path.isAbsolute(p));
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
 }
 
 /** Build the whisper-cli argument list (pure, testable). */

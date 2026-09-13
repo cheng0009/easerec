@@ -74,6 +74,8 @@ export async function toggleRecording(): Promise<string | null> {
   // Second press during the countdown = cancel it.
   if (isCountdownActive()) {
     cancelCountdown();
+    // START already hid the window — restore it when the countdown is aborted.
+    try { await getCurrentWindow().unminimize(); } catch { /* ignore */ }
     return null;
   }
 
@@ -81,6 +83,9 @@ export async function toggleRecording(): Promise<string | null> {
   if (st.recording.isRecording) {
     st.setRecording({ isRecording: false });
     closeOpenMarksOnStop();
+    // The main window was hidden to the tray on START — bring it back so the
+    // user can act (export, review) without hunting for the tray icon.
+    try { await getCurrentWindow().unminimize(); } catch { /* ignore */ }
     try {
       const path = await getDirector().stopAndSave();
       if (path) {
