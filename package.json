@@ -4,6 +4,7 @@
   "version": "0.1.4",
   "description": "简录 EaseRec — 面向知识创作者的录屏导播台（录屏即成片）",
   "author": "cheng0009",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
