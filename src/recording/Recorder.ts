@@ -86,10 +86,21 @@ export class Recorder {
   private streamedPath: string | null = null;
   /** Recording wall-clock start (Date.now at MediaRecorder.start). */
   private recStartWallMs = 0;
+  /** Last onElapsed emission (throttle for the UI clock feed). */
+  private lastElapsedEmitAt = 0;
 
   // --- Fast-forward mode ----------------------------------------------------
   private ffMode = false;
   private audioTrackRefs: MediaStreamTrack[] = [];
+  // --- Audio mixing (loopback + mic -> single recorded track) ---------------
+  /** WebAudio graph that merges system + mic into ONE track (Chrome's WebM
+   *  muxer only records a single audio track, so "both" must be pre-mixed or
+   *  the second source is silently dropped). Null when not mixing. */
+  private audioMixer: {
+    ctx: AudioContext;
+    sources: MediaStreamAudioSourceNode[];
+    recordTrack: MediaStreamTrack;
+  } | null = null;
 
   /** 30ms recording tick: mouse sampling + (webcam mode) canvas painting.
    *  Runs while minimized — rAF does not, which used to freeze recordings. */
@@ -346,6 +357,33 @@ export class Recorder {
     }
   }
 
+  /** Merge several audio tracks into ONE track (Chrome's webm muxer keeps a
+   *  single audio track; `both` needs system + mic combined beforehand).
+   *  The sources are left running — FF-mute and the WebAudio graph both read
+   *  the raw tracks, so `track.enabled` keeps working as the mute switch. */
+  private mixAudioTracks(tracks: MediaStreamTrack[]): NonNullable<Recorder["audioMixer"]> {
+    const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const ctx = new Ctor();
+    void ctx.resume();
+    // Force 2ch output: system audio is usually stereo, mic mono; the muxer
+    // would otherwise pick whichever channel layout comes first.
+    const dest = ctx.createMediaStreamDestination();
+    const sources = tracks.map((t) => {
+      const src = ctx.createMediaStreamSource(new MediaStream([t]));
+      src.connect(dest);
+      return src;
+    });
+    const recordTrack = dest.stream.getAudioTracks()[0];
+    if (!recordTrack) {
+      // Extremely defensive: if the destination produced no track, fall back
+      // to the first raw input rather than recording silence.
+      sources.forEach((s) => s.disconnect());
+      void ctx.close();
+      return { ctx, sources: [], recordTrack: tracks[0] };
+    }
+    return { ctx, sources, recordTrack };
+  }
+
   setCursorPosition(x: number, y: number): void {
     if (!this.spring || !this.smart) return;
     // x/y come from the OS as DIP coordinates (screen.getCursorScreenPoint).
@@ -433,6 +471,21 @@ export class Recorder {
       if (at) audioTracks.push(at);
     }
 
+    // Chrome's MediaRecorder only muxes ONE audio track into the webm. When
+    // "both" is selected, both system loopback + mic arrive as separate tracks
+    // — without pre-mixing, the second one is silently lost and the export is
+    // half-silent. Merge them into a single track via Web Audio.
+    if (audioTracks.length > 1) {
+      this.audioMixer = this.mixAudioTracks(audioTracks);
+      const mixed = this.audioMixer.recordTrack;
+      // Keep the RAW tracks for FF-mute; recording uses the mixed track.
+      this.audioTrackRefs = audioTracks;
+      audioTracks.splice(0, audioTracks.length, mixed);
+    } else {
+      this.audioMixer = null;
+      this.audioTrackRefs = audioTracks;
+    }
+
     // Video source: raw capture track unless the webcam PiP must be baked in.
     let videoTracks: MediaStreamTrack[];
     const webcamActive = !!(this.webcamVideo && useStore.getState().webcam.enabled);
@@ -445,7 +498,6 @@ export class Recorder {
     }
 
     const recordStream = new MediaStream([...videoTracks, ...audioTracks]);
-    this.audioTrackRefs = audioTracks;
 
     // Open the main-process session BEFORE the first chunk can arrive so the
     // EBML header lands in a fresh file (incremental disk flush).
@@ -507,6 +559,7 @@ export class Recorder {
     this.mouseSamples = [];
     this.lastMouseSampleAt = 0;
     this.lastPreviewAt = 0;
+    this.lastElapsedEmitAt = 0;
     // The 30ms recording tick replaces rAF while the app is minimized
     // (rAF stops firing for hidden windows; timers with
     // backgroundThrottling:false do not). It samples the mouse trajectory
@@ -515,6 +568,12 @@ export class Recorder {
     this.recTickTimer = setInterval(() => {
       if (!this.recording) return;
       this.sampleMouseTrack();
+      // UI elapsed clock (LIVE badge, film strip). Throttled far below the
+      // 30ms sampling cadence — the store update re-renders the studio.
+      if (Date.now() - this.lastElapsedEmitAt >= 500) {
+        this.lastElapsedEmitAt = Date.now();
+        this.handlers.onElapsed?.(Date.now() - this.recStartWallMs);
+      }
     }, 30);
     // Preview painter: rAF is fine here (the PREVIEW may freeze while
     // minimized — only the RECORDING matters then). In raw mode this paints
@@ -1026,6 +1085,13 @@ export class Recorder {
       try { t.enabled = true; } catch { /* ignore */ }
     }
     this.audioTrackRefs = [];
+    if (this.audioMixer) {
+      try {
+        this.audioMixer.sources.forEach((s) => s.disconnect());
+      } catch { /* ignore */ }
+      try { void this.audioMixer.ctx.close(); } catch { /* ignore */ }
+      this.audioMixer = null;
+    }
     this.ffMode = false;
     return blob;
   }
@@ -1087,6 +1153,14 @@ export class Recorder {
   /** Attach/replace the error callback (startup wires it to UI feedback). */
   setErrorHandler(fn: ((message: string) => void) | undefined): void {
     this.handlers.onError = fn;
+  }
+
+  /** Merge late-arriving callbacks into the handler set. The singleton is
+   *  typically created by the first getDirector() call BEFORE callers that
+   *  pass callbacks (elapsed/perf feeds) get a say — without this merge
+   *  their handlers would be silently dropped. */
+  setHandlers(patch: RecorderHandlers): void {
+    this.handlers = { ...this.handlers, ...patch };
   }
 
   dispose(): void {

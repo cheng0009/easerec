@@ -5,7 +5,7 @@ import { useLang } from "../../lib/useLang";
 import i18n from "../../i18n";
 
 /**
- * Hub shell — title bar with the two top-level views (工作台 / 成片库),
+ * Hub shell — title bar with the two top-level views (工作台 / 素材库),
  * theme + language toggles. The chrome is intentionally minimal.
  */
 export function HubShell({ children }: { children: ReactNode }) {
@@ -36,7 +36,8 @@ export function HubShell({ children }: { children: ReactNode }) {
         <div style={styles.tabs}>
           <button
             style={{ ...styles.tab, ...(ui.view === "studio" ? styles.tabOn : {}) }}
-            onClick={() => setUi({ view: "studio" })}
+            onClick={() => setUi({ view: "studio", reviewPath: null })}
+            title={L("回到工作台 = 实时预览（回放只属于刚停的那一条）", "Studio = live preview; playback belongs to the just-stopped take only")}
           >
             🎬 {L("工作台", "Studio")}
           </button>
@@ -44,7 +45,7 @@ export function HubShell({ children }: { children: ReactNode }) {
             style={{ ...styles.tab, ...(ui.view === "library" ? styles.tabOn : {}) }}
             onClick={() => setUi({ view: "library" })}
           >
-            📚 {L("成片库", "Library")}
+            📚 {L("素材库", "Library")}
           </button>
         </div>
         <div style={styles.right}>

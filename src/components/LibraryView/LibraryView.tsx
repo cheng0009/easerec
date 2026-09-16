@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "../../store";
 import { tauriInvoke } from "../../lib/tauri";
 import { formatClock } from "../../recording/edl";
 import { AUTHOR_SHORT_ZH, AUTHOR_SHORT_EN } from "../../lib/authorStory";
 import { useLang, isZhLang } from "../../lib/useLang";
+import { dcMediaUrl } from "../../lib/mediaUrl";
 
 interface RecordingEntry {
   webmPath: string;
@@ -18,13 +19,15 @@ interface LibraryItem extends RecordingEntry {
   durationMs: number;
 }
 
-/** 成片库 — the archive half of the hub. Every recording, its marks, its ways out. */
-export function LibraryView() {
+/** 素材库 — the archive half of the hub. Every recording, its marks, its ways out.
+ *  Playback stays INSIDE the library (modal player): the studio tab always
+ *  means the live stage, never "resume an old take". */
+export function LibraryView({ visible }: { visible: boolean }) {
   const L = useLang();
   const [items, setItems] = useState<LibraryItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const setUi = useStore((s) => s.setUi);
-  const setRecording = useStore((s) => s.setRecording);
+  const [playing, setPlaying] = useState<LibraryItem | null>(null);
+  const playerRef = useRef<HTMLVideoElement>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -55,13 +58,19 @@ export function LibraryView() {
     }
   }, []);
 
-  useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => { if (visible) void refresh(); }, [visible, refresh]);
 
-  const openInStudio = (it: LibraryItem) => {
-    setRecording({ sourceId: null, sourceName: "主显示器", sourceKind: null });
-    useStore.getState().setMarks({ edits: [], webmPath: it.webmPath });
-    setUi({ view: "studio", reviewPath: it.webmPath, exportOpen: false });
-  };
+  // Tab hidden behind the studio: stop the sound, keep the modal selection.
+  useEffect(() => {
+    if (!visible) playerRef.current?.pause();
+  }, [visible]);
+  // ESC closes the player.
+  useEffect(() => {
+    if (!playing) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setPlaying(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [playing]);
 
   const timeAgo = (ms: number): string => {
     const diff = Date.now() - ms;
@@ -77,7 +86,7 @@ export function LibraryView() {
   const totalBytes = items.reduce((a, i) => a + i.sizeBytes, 0);
 
   return (
-    <div style={styles.wrap}>
+    <div style={{ ...styles.wrap, display: visible ? "flex" : "none" }}>
       <div style={styles.head}>
         <span style={styles.title}>
           {items.length} 个录像 · 共 {(totalBytes / 1024 / 1024 / 1024).toFixed(2)} GB
@@ -103,7 +112,12 @@ export function LibraryView() {
         {items.map((it) => {
           const markCount = it.edits.cuts + it.edits.masks + it.edits.speedups + it.edits.pauses;
           return (
-            <div key={it.webmPath} style={{ ...styles.card, ...(it.finalized ? {} : styles.cardUnfinished) }}>
+            <div
+              key={it.webmPath}
+              style={{ ...styles.card, ...(it.finalized ? {} : styles.cardUnfinished), cursor: "pointer" }}
+              onClick={() => setPlaying(it)}
+              title={L("点击播放", "Click to play")}
+            >
               <div style={styles.thumb}>
                 {it.finalized ? "▶" : "⚠"}
               </div>
@@ -129,12 +143,13 @@ export function LibraryView() {
                   {!it.finalized && <span style={{ ...styles.markTag, background: "rgba(232,182,74,0.25)" }}>{L("未正常结束", "Unfinished")}</span>}
                 </div>
                 <div style={styles.cardActions}>
-                  <button style={styles.primary} onClick={() => openInStudio(it)} title={L("载入工作台回放/导出", "Open in the Studio for review/export")}>
-                    {L("打开", "Open")}
+                  <button style={styles.primary} onClick={(e) => { e.stopPropagation(); setPlaying(it); }} title={L("在素材库内播放预览", "Preview inside the library")}>
+                    {L("播放", "Play")}
                   </button>
-                  <button style={styles.btn} onClick={() => tauriInvoke("open_folder", { path: it.webmPath.replace(/[\\/][^\\/]+$/, "") })}>目录</button>
+                  <button style={styles.btn} onClick={(e) => { e.stopPropagation(); tauriInvoke("open_folder", { path: it.webmPath.replace(/[\\/][^\\/]+$/, "") }).catch(() => {}); }}>目录</button>
                   {!it.finalized && (
-                    <button style={styles.btn} title={L("忽略恢复提示", "Dismiss recovery")} onClick={async () => {
+                    <button style={styles.btn} title={L("忽略恢复提示", "Dismiss recovery")} onClick={async (e) => {
+                      e.stopPropagation();
                       await tauriInvoke("recording_mark_finalized", { webmPath: it.webmPath }).catch(() => {});
                       void refresh();
                     }}>{L("忽略", "Dismiss")}</button>
@@ -145,6 +160,33 @@ export function LibraryView() {
           );
         })}
       </div>
+
+      {/* In-library player: preview without ever touching the studio's state.
+          key= remounts per item so one take ending never poisons the next. */}
+      {playing && (
+        <div style={styles.playerMask} onClick={() => setPlaying(null)}>
+          <div style={styles.playerCard} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.playerHead}>
+              <span style={styles.playerTitle} title={playing.webmPath}>
+                {playing.webmPath.split(/[\\/]/).pop()}
+              </span>
+              <span style={styles.playerMeta}>
+                {playing.durationMs > 0 ? formatClock(playing.durationMs) : `${(playing.sizeBytes / 1024 / 1024).toFixed(0)} MB`}
+                {" · "}{timeAgo(playing.mtimeMs)}
+              </span>
+              <button style={styles.playerClose} onClick={() => setPlaying(null)} title={L("关闭 (Esc)", "Close (Esc)")}>✕</button>
+            </div>
+            <video
+              ref={playerRef}
+              key={playing.webmPath}
+              src={dcMediaUrl(playing.webmPath)}
+              controls
+              autoPlay
+              style={styles.playerVideo}
+            />
+          </div>
+        </div>
+      )}
 
       <div style={styles.footer}>
         <span>© 2026 {L("简录 EaseRec · 让知识输出回归纯粹", "EaseRec — recording, simplified")}</span>
@@ -186,6 +228,20 @@ const styles: Record<string, React.CSSProperties> = {
   cardMarks: { display: "flex", gap: 4, flexWrap: "wrap" },
   markTag: { fontSize: 10, padding: "1px 6px", borderRadius: 6, background: "rgba(255,69,96,0.15)", color: "var(--text-secondary)" },
   cardActions: { display: "flex", gap: 6, marginTop: 4 },
+  playerMask: {
+    position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.62)",
+    display: "flex", alignItems: "center", justifyContent: "center",
+  },
+  playerCard: {
+    width: "min(880px, 88vw)", background: "var(--bg-secondary)",
+    border: "1px solid var(--border-default)", borderRadius: "var(--radius-md)",
+    overflow: "hidden", boxShadow: "0 18px 60px rgba(0,0,0,0.5)",
+  },
+  playerHead: { display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderBottom: "1px solid var(--border-subtle)" },
+  playerTitle: { fontSize: 12, fontWeight: 600, color: "var(--text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 },
+  playerMeta: { fontSize: 10, color: "var(--text-muted)", fontFamily: "var(--font-mono)", flexShrink: 0 },
+  playerClose: { background: "none", border: "none", color: "var(--text-secondary)", fontSize: 13, cursor: "pointer", flexShrink: 0, padding: "0 2px" },
+  playerVideo: { display: "block", width: "100%", maxHeight: "70vh", background: "#000", objectFit: "contain" },
   footer: { marginTop: 18, paddingTop: 10, borderTop: "1px solid var(--border-subtle)", display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 10, color: "var(--text-muted)" },
   footerBtn: { fontSize: 10, padding: "3px 10px", borderRadius: 8, background: "var(--bg-tertiary)", color: "var(--text-secondary)", border: "1px solid var(--border-default)", cursor: "pointer" },
 };

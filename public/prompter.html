@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>提词器</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; background: transparent; overflow: hidden; user-select: none;
+      font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+    .card {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column;
+      background: rgba(12, 14, 20, 0.92); color: #f2f3f7;
+      border: 1px solid rgba(255,255,255,0.16);
+      border-radius: 10px; overflow: hidden;
+    }
+    .toolbar {
+      height: 34px; flex-shrink: 0;
+      display: flex; align-items: center; gap: 6px; padding: 0 8px;
+      background: rgba(255,255,255,0.05); border-bottom: 1px solid rgba(255,255,255,0.09);
+      -webkit-app-region: drag; cursor: grab; user-select: none;
+    }
+    .toolbar .title { font-size: 11px; font-weight: 700; color: #c3c7d8; letter-spacing: 1px; margin-right: auto; }
+    .tb { -webkit-app-region: no-drag; flex-shrink: 0; height: 22px; padding: 0 7px;
+      border-radius: 5px; border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.07); color: #d4d8e6; font-size: 10px; cursor: pointer;
+      display: inline-flex; align-items: center; gap: 3px; line-height: 1; }
+    .tb:hover { background: rgba(255,255,255,0.16); color: #fff; }
+    .tb.on { background: rgba(99,130,255,0.3); border-color: rgba(99,130,255,0.6); color: #fff; }
+    .tb.ghost { color: #7a8095; }
+    .tb .k { font-size: 8px; opacity: 0.7; }
+    .toolbar input[type=range] { -webkit-app-region: no-drag; width: 62px; accent-color: #6382ff; }
+    .toolbar .spdlbl { font-size: 9px; color: #8a90a6; }
+    .viewport { position: relative; flex: 1; overflow: hidden; }
+    .content {
+      position: absolute; top: 0; left: 0; right: 0;
+      will-change: transform;
+      padding: 12px 20px 20px;
+      line-height: 1.62;
+    }
+    .para { margin-bottom: 0.72em; }
+    .para .mark { color: #6382ff; opacity: 0.85; margin-right: 2px; }
+    .empty { color: #565c70; text-align: center; padding-top: 24px; font-size: 13px; }
+    .progress {
+      position: absolute; left: 0; right: 0; bottom: 0; height: 3px;
+      background: rgba(255,255,255,0.06);
+    }
+    .progress > i { display: block; height: 100%; background: linear-gradient(90deg, #6382ff, #7f9bff); width: 0; }
+    .hint { position: absolute; top: 40px; right: 10px; font-size: 9px; color: rgba(200,205,222,0.45);
+      letter-spacing: 0.5px; pointer-events: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="toolbar" id="toolbar">
+      <span class="title">📜 提词</span>
+      <button class="tb" id="fontMinus" title="缩小字号">A−</button>
+      <button class="tb" id="fontPlus" title="加大字号">A+</button>
+      <button class="tb on" id="playBtn" title="自动滚动（空格）">▶ <span class="k">Space</span></button>
+      <button class="tb" id="prevBtn" title="上一段（↑）">▲</button>
+      <button class="tb" id="nextBtn" title="下一段（↓）">▼</button>
+      <label class="spdlbl">速</label>
+      <input id="speed" type="range" min="0" max="40" step="1" value="10" title="滚动速度 px/s" />
+      <button class="tb" id="closeBtn" title="隐藏提词窗（F2）">✕</button>
+    </div>
+    <div class="viewport" id="viewport">
+      <div class="content" id="content"></div>
+      <div class="hint" id="hint">滚轮/↑↓微调 · 空格 播放/暂停 · 拖动标题移动</div>
+      <div class="progress"><i id="progressBar"></i></div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const api = window.__directorcam;
+      const $ = (id) => document.getElementById(id);
+      const viewport = $("viewport"), content = $("content");
+      const playBtn = $("playBtn"), speedEl = $("speed"), progressBar = $("progressBar");
+
+      // --- Local state -------------------------------------------------------
+      let text = "";
+      let fontSize = 56;
+      let speed = 10;
+      let playing = true;
+      let offset = 0;
+      let lastT = 0;
+      let rafId = 0;
+
+      function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
+
+      function maxScroll() {
+        const viewH = viewport.clientHeight - 16;
+        return Math.max(0, content.scrollHeight - viewH);
+      }
+
+      // --- Render ------------------------------------------------------------
+      function paragraphs() {
+        return text.replace(/^\uFEFF/, "").split(/\n\s*\n/)
+          .map((p) => p.replace(/\s*\n\s*/g, " ").trim()).filter(Boolean);
+      }
+
+      function render() {
+        const paras = paragraphs();
+        content.style.fontSize = fontSize + "px";
+        if (paras.length === 0) {
+          content.innerHTML = '<div class="empty">在此侧栏输入脚本，然后按 F2…</div>';
+          refresh();
+          return;
+        }
+        let html = "";
+        const marks = ["①","②","③","④","⑤","⑥","⑦","⑧","⑨","⑩"];
+        paras.forEach((p, i) => {
+          html += '<div class="para" data-i="' + i + '"><span class="mark">'
+            + (marks[i] || "•") + "</span>" + esc(p) + "</div>";
+        });
+        content.innerHTML = html;
+        refresh();
+      }
+
+      function esc(s) {
+        return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      }
+
+      function refresh() {
+        const ms = maxScroll();
+        offset = clamp(offset, 0, ms);
+        content.style.transform = "translateY(-" + offset + "px)";
+        progressBar.style.width = (ms > 0 ? (offset / ms) * 100 : 0) + "%";
+      }
+
+      // --- Auto scroll -------------------------------------------------------
+      function tick(t) {
+        if (playing && speed > 0) {
+          const dt = lastT ? (t - lastT) / 1000 : 0;
+          lastT = t;
+          offset += speed * dt;
+          offset = clamp(offset, 0, maxScroll());
+          if (offset >= maxScroll()) { setPlaying(false); }
+        } else {
+          lastT = t;
+        }
+        refresh();
+        rafId = requestAnimationFrame(tick);
+      }
+
+      function setPlaying(v) {
+        if (playing === v) return;
+        playing = v;
+        playBtn.classList.toggle("on", playing);
+        playBtn.firstChild.textContent = playing ? "▶ " : "❚❚ ";
+      }
+
+      // --- Manual scroll -----------------------------------------------------
+      function jumpToParagraph(dir) {
+        const paras = content.querySelectorAll(".para");
+        if (!paras.length) return;
+        let target = -1;
+        for (let i = 0; i < paras.length; i++) {
+          const top = paras[i].offsetTop;
+          if (dir > 0 && top > offset + 8) { target = i; break; }
+          if (dir < 0) { target = i; if (top >= offset - 8) break; }
+        }
+        if (target >= 0) {
+          const top = paras[target].offsetTop;
+          // Leave a small margin so the paragraph mark stays readable.
+          offset = clamp(top - 8, 0, maxScroll());
+          refresh();
+        }
+      }
+
+      function nudge(dy) {
+        offset = clamp(offset + dy, 0, maxScroll());
+        refresh();
+      }
+
+      viewport.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        const line = e.deltaMode === 1 ? 16 : 1;
+        nudge(e.deltaY * line);
+      }, { passive: false });
+
+      window.addEventListener("keydown", (e) => {
+        if (e.repeat && e.key === " ") return;
+        switch (e.key) {
+          case " ": e.preventDefault(); setPlaying(!playing); break;
+          case "ArrowUp": e.preventDefault(); nudge(-48); break;
+          case "ArrowDown": e.preventDefault(); nudge(48); break;
+          case "PageUp": e.preventDefault(); nudge(-(viewport.clientHeight * 0.7)); break;
+          case "PageDown": e.preventDefault(); nudge(viewport.clientHeight * 0.7); break;
+          case "Home": e.preventDefault(); offset = 0; refresh(); break;
+          case "End": e.preventDefault(); offset = maxScroll(); refresh(); break;
+        }
+      });
+
+      window.addEventListener("resize", refresh);
+
+      // --- Toolbar -----------------------------------------------------------
+      function push(partial) {
+        if (api && typeof api.invoke === "function") {
+          api.invoke("teleprompter_set", { state: partial }).catch(() => {});
+        }
+      }
+
+      $("fontMinus").addEventListener("click", () => {
+        fontSize = clamp(fontSize - 4, 24, 200);
+        push({ fontSize }); render();
+      });
+      $("fontPlus").addEventListener("click", () => {
+        fontSize = clamp(fontSize + 4, 24, 200);
+        push({ fontSize }); render();
+      });
+      playBtn.addEventListener("click", () => setPlaying(!playing));
+      $("prevBtn").addEventListener("click", () => { setPlaying(false); jumpToParagraph(-1); });
+      $("nextBtn").addEventListener("click", () => { setPlaying(false); jumpToParagraph(1); });
+      $("closeBtn").addEventListener("click", () => push({ visible: false }));
+      speedEl.addEventListener("input", () => {
+        speed = Number(speedEl.value) || 0;
+        push({ speed });
+        if (speed <= 0) setPlaying(false);
+        else setPlaying(true);
+      });
+
+      // --- State from main ---------------------------------------------------
+      function applyState(st) {
+        if (!st) return;
+        let rerender = false;
+        if (typeof st.fontSize === "number" && Number.isFinite(st.fontSize) && st.fontSize >= 24) {
+          if (st.fontSize !== fontSize) { fontSize = st.fontSize; rerender = true; }
+        }
+        if (typeof st.speed === "number" && Number.isFinite(st.speed)) {
+          const s = clamp(st.speed, 0, 40);
+          if (s !== speed) { speed = s; speedEl.value = String(s); }
+        }
+        if (typeof st.text === "string" && st.text !== text) {
+          // New script: start over at the top and auto-scroll.
+          text = st.text;
+          offset = 0;
+          rerender = true;
+          if (speed > 0) setPlaying(true);
+        }
+        if (rerender) render();
+        refresh();
+      }
+
+      if (api && typeof api.on === "function") {
+        api.on("teleprompter-state", (p) => { try { applyState(p); } catch (e) { console.error(e); } });
+      }
+      // Pull the authoritative state once in case an early event was missed.
+      if (api && typeof api.invoke === "function") {
+        api.invoke("teleprompter_get").then((st) => {
+          try { if (st) applyState(st); } catch (e) { console.error(e); }
+        }).catch(() => {});
+      }
+
+      render();
+      rafId = requestAnimationFrame(tick);
+    })();
+  </script>
+</body>
+</html>

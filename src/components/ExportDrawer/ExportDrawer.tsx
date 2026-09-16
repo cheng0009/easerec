@@ -19,8 +19,16 @@ export function ExportDrawer() {
   const [progress, setProgress] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
   const [chapters, setChapters] = useState<string | null>(null);
+  const [llmTesting, setLlmTesting] = useState(false);
+  const [llmTestResult, setLlmTestResult] = useState<string | null>(null);
   const [whisperOk, setWhisperOk] = useState<boolean | null>(null);
   const [sysFonts, setSysFonts] = useState<string[]>([]);
+  // Hotword auto-extraction: candidates from the last transcript, picked via
+  // chips, then merged into settings.glossary.
+  const [hwSuggested, setHwSuggested] = useState<string[] | null>(null);
+  const [hwPicked, setHwPicked] = useState<Set<string>>(new Set());
+  const [hwBusy, setHwBusy] = useState(false);
+  const [hwMsg, setHwMsg] = useState<string | null>(null);
   const saveTimer = useRef<number | null>(null);
 
   useEffect(() => {
@@ -50,6 +58,18 @@ export function ExportDrawer() {
   const updateStyle = (patch: Partial<typeof style>) => setSettings({ subtitleStyle: { ...style, ...patch } });
   const updateLlm = (patch: Partial<typeof settings.llm>) => setSettings({ llm: { ...settings.llm, ...patch } });
 
+  const testLlm = async () => {
+    setLlmTesting(true); setLlmTestResult(null);
+    try {
+      const res = await tauriInvoke<{ ok: boolean; detail: string }>("test_llm", { llm: settings.llm });
+      setLlmTestResult(res?.detail ?? (isZhLang() ? "无响应" : "No response"));
+    } catch (e) {
+      setLlmTestResult(isZhLang() ? `连接失败：${e}` : `Connection failed: ${e}`);
+    } finally {
+      setLlmTesting(false);
+    }
+  };
+
   const pickOutputDir = async () => {
     const selected = await open({ directory: true, multiple: false, title: "选择输出文件夹" });
     if (selected && typeof selected === "string") setSettings({ outputDir: selected });
@@ -66,7 +86,10 @@ export function ExportDrawer() {
 
       const outDir = (settings.outputDir || "").trim();
       const base = outDir ? outDir.replace(/[\\/]+$/, "") : "%USERPROFILE%/Desktop";
-      const outputPath = base + "/DirectorCam_Recording.mp4";
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const now = new Date();
+      const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      const outputPath = `${base}/easeocr_${stamp}.mp4`;
 
       const msg = await tauriInvoke<string>("export_video", {
         inputPath: savedPath,
@@ -77,8 +100,6 @@ export function ExportDrawer() {
           zoom_level: settings.zoomLevel ?? 1.5,
           brand_outro: settings.brandOutro,
           brand_lang: useStore.getState().current === "en" ? "en" : "zh",
-          trim_silence: settings.silenceThresholdS > 0,
-          silence_threshold_s: settings.silenceThresholdS,
           loudnorm: settings.loudnorm,
           burn_subtitles: settings.subtitleEnabled,
           subtitle_style: settings.subtitleStyle,
@@ -117,6 +138,44 @@ export function ExportDrawer() {
   const openContainingFolder = () => {
     const match = result?.match(/Saved to: (.+)/);
     if (match) tauriInvoke("open_folder", { path: match[1].replace(/（.*$/, "").replace(/[\\/][^\\/]+$/, "") }).catch(() => {});
+  };
+
+  /** Mine the last export's transcript for glossary candidates — no typing. */
+  const extractHotwords = async () => {
+    const match = result?.match(/Saved to: (.+?)(?:（|$)/);
+    if (!match) {
+      setHwMsg(L("先导出一次带字幕的视频，之后即可从它的转写文本提取热词。", "Export once with subtitles first — hotwords are extracted from that transcript."));
+      return;
+    }
+    setHwBusy(true); setHwMsg(null);
+    try {
+      const res = await tauriInvoke<{ hotwords?: string[]; error?: string }>("extract_hotwords", {
+        transcriptPath: `${match[1].trim()}.transcript.json`,
+        glossary: settings.glossary,
+        llm: settings.llm,
+      });
+      if (res?.hotwords && res.hotwords.length > 0) {
+        setHwSuggested(res.hotwords);
+        setHwPicked(new Set(res.hotwords));
+      } else {
+        setHwSuggested(null);
+        setHwMsg(res?.error === "llm"
+          ? L("提取失败：需要先在下方启用并配置 LLM 校正。", "Extraction needs the LLM correction settings enabled below.")
+          : L("没有提取到新热词（转写为空或 LLM 无响应）。", "No new hotwords found (empty transcript or LLM silent)."));
+      }
+    } catch (e) {
+      setHwMsg(L("提取失败", "Extraction failed") + ": " + String(e));
+    } finally {
+      setHwBusy(false);
+    }
+  };
+
+  const addPickedHotwords = () => {
+    if (!hwSuggested) return;
+    const lines = settings.glossary.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    const merged = [...lines, ...hwPicked].filter((w, i, a) => a.indexOf(w) === i);
+    setSettings({ glossary: merged.join("\n") });
+    setHwSuggested(null); setHwPicked(new Set()); setHwMsg(null);
   };
 
   const generateChapters = async () => {
@@ -167,8 +226,6 @@ export function ExportDrawer() {
       )}
 
       <Group label={L("画面与音频", "Picture & audio")}>
-        <Toggle label={L("静音裁剪", "Silence trim")} hint={L("剪掉长静音，节奏更快", "Cuts long silences for tighter pacing")} value={settings.silenceThresholdS > 0}
-          onChange={(v) => setSettings({ silenceThresholdS: v ? 1.5 : 0 })} />
         <Toggle label={L("响度归一", "Loudness normalize")} hint={L("EBU R128，成片音量一致", "EBU R128 — consistent loudness")} value={settings.loudnorm}
           onChange={(v) => setSettings({ loudnorm: v })} />
         <Toggle label={L("同时导出竖版 9:16", "Also export vertical 9:16")} hint={L("按录制时的镜头轨迹自动取景（抖音/Shorts）", "Auto-reframed from the camera track (Douyin/Shorts)")} value={settings.verticalExport}
@@ -177,7 +234,7 @@ export function ExportDrawer() {
         <div style={rowStyle}>
           <div style={{ flex: 1 }}>
             <div style={labelStyle}>{L("附加品牌片尾", "Append brand outro")}</div>
-            <div style={hintStyle}>{L("成片结尾附加 2.8 秒「简录 EaseRec」品牌动画（含品牌 Logo），感谢支持 ❤", "A 2.8s EaseRec brand card closes the film — logo, title & slogan, thank you ❤")}</div>
+            <div style={hintStyle}>{L("成片结尾附加 2.8 秒「简录 EaseRec」品牌动画，感谢支持 ❤", "A 2.8s EaseRec brand card closes the film — title & slogan, thank you ❤")}</div>
           </div>
           <input type="checkbox" checked readOnly disabled title={L("固定开启", "Always on")} />
         </div>
@@ -228,7 +285,9 @@ export function ExportDrawer() {
                 <option value="top">{L("顶部", "Top")}</option>
               </select>
             </Row>
-            {/* Live subtitle preview: renders with the EXACT configured style. */}
+            {/* Live subtitle preview: renders with the EXACT configured style.
+                The 96px box + fontSize/2 models a 192-unit frame — the burn
+                stage (ass.ts REF_H = 192) matches these exact proportions. */}
             <div style={{ marginTop: 8 }}>
               <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{L("实时预览", "Live preview")}</span>
               <div style={{
@@ -259,10 +318,38 @@ export function ExportDrawer() {
               </div>
             </div>
             <div style={{ ...rowStyle, flexDirection: "column", alignItems: "stretch", gap: 4 }}>
-              <span style={labelStyle}>{L("热词表（每行一个，注入识别与校正）", "Hot words (one per line, injected into ASR & correction)")}</span>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <span style={labelStyle}>{L("热词表（每行一个，注入识别与校正）", "Hot words (one per line, injected into ASR & correction)")}</span>
+                <button style={styles.hwBtn} onClick={() => void extractHotwords()} disabled={hwBusy}
+                  title={L("从最近一次导出的转写文本中自动提取专有名词", "Auto-extract proper nouns from the last export's transcript")}>
+                  {hwBusy ? L("提取中…", "Extracting…") : L("🪄 从转写提取", "🪄 Extract from transcript")}
+                </button>
+              </div>
               <textarea value={settings.glossary} rows={2} style={styles.glossary}
                 placeholder={"DeepSeek\nSpringCamera"}
                 onChange={(e) => setSettings({ glossary: e.target.value })} />
+              {hwMsg && <div style={{ fontSize: 11, color: "var(--text-muted)" }}>{hwMsg}</div>}
+              {hwSuggested && (
+                <div style={styles.hwBox}>
+                  <div style={styles.hwHead}>
+                    <span>{L("勾选要加入的热词：", "Pick hotwords to add:")}</span>
+                    <span style={{ display: "flex", gap: 4 }}>
+                      <button style={styles.hwMini} onClick={() => setHwPicked(new Set(hwSuggested))}>{L("全选", "All")}</button>
+                      <button style={styles.hwMini} onClick={() => setHwPicked(new Set())}>{L("清空", "None")}</button>
+                      <button style={styles.hwAdd} onClick={addPickedHotwords}>{`${L("加入", "Add")} (${hwPicked.size})`}</button>
+                    </span>
+                  </div>
+                  <div style={styles.hwChips}>
+                    {hwSuggested.map((w) => (
+                      <button key={w}
+                        style={{ ...styles.hwChip, ...(hwPicked.has(w) ? styles.hwChipOn : {}) }}
+                        onClick={() => setHwPicked((prev) => { const n = new Set(prev); if (n.has(w)) n.delete(w); else n.add(w); return n; })}>
+                        {w}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
             <Toggle label={L("LLM 在线校正", "LLM online correction")} hint={L("改错字与同音字；时间戳不受影响，失败自动回退本地结果", "Fixes typos/homophones; timestamps untouched; falls back on failure")}
               value={settings.llm.enabled} onChange={(v) => updateLlm({ enabled: v })} />
@@ -283,6 +370,17 @@ export function ExportDrawer() {
                   <input type="text" value={settings.llm.model} style={{ ...inp, flex: 1 }}
                     onChange={(e) => updateLlm({ model: e.target.value })} />
                 </Row>
+                <Row label=" ">
+                  <button style={{ ...styles.miniBtn, flex: 1, color: llmTesting ? "var(--text-muted)" : "var(--accent)" }}
+                    onClick={testLlm} disabled={llmTesting || !settings.llm.apiKey}>
+                    {llmTesting ? L("⏳ 测试中…", "Testing…") : L("🔌 测试连接", "Test connection")}
+                  </button>
+                </Row>
+                {llmTestResult && (
+                  <div style={{ fontSize: 11, color: llmTestResult.startsWith("✓") ? "var(--accent)" : "var(--danger, #e5484d)", wordBreak: "break-all" }}>
+                    {llmTestResult}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -387,6 +485,14 @@ const styles: Record<string, React.CSSProperties> = {
   close: { background: "none", border: "none", color: "var(--text-muted)", fontSize: 14, cursor: "pointer" },
   subBlock: { margin: "6px 0 4px", padding: "8px 10px", background: "var(--bg-primary)", borderRadius: 6, border: "1px solid var(--border-subtle)" },
   glossary: { width: "100%", padding: "4px 6px", borderRadius: 4, border: "1px solid var(--border-default)", background: "var(--bg-primary)", color: "var(--text-primary)", fontSize: 11, fontFamily: "var(--font-mono)", resize: "vertical" },
+  hwBtn: { fontSize: 10, padding: "3px 10px", borderRadius: "var(--radius-sm)", background: "var(--bg-tertiary)", color: "var(--text-secondary)", border: "1px solid var(--border-default)", cursor: "pointer", flexShrink: 0 },
+  hwBox: { display: "flex", flexDirection: "column", gap: 6, padding: 7, borderRadius: 4, border: "1px dashed var(--border-default)" },
+  hwHead: { display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 11, color: "var(--text-secondary)" },
+  hwMini: { fontSize: 10, padding: "1px 8px", borderRadius: 3, border: "1px solid var(--border-default)", background: "var(--bg-tertiary)", color: "var(--text-primary)", cursor: "pointer" },
+  hwAdd: { fontSize: 10, padding: "2px 10px", borderRadius: 3, border: "none", background: "var(--accent)", color: "#fff", cursor: "pointer", fontWeight: 700 },
+  hwChips: { display: "flex", flexWrap: "wrap", gap: 4 },
+  hwChip: { fontSize: 11, padding: "2px 10px", borderRadius: 10, border: "1px solid var(--border-default)", background: "var(--bg-tertiary)", color: "var(--text-secondary)", cursor: "pointer" },
+  hwChipOn: { borderColor: "var(--accent)", background: "var(--accent-glow)", color: "var(--text-primary)", fontWeight: 700 },
   warn: { fontSize: 10, color: "#e8b64a", marginBottom: 4 },
   recovery: { marginBottom: 8, padding: 8, borderRadius: 6, background: "rgba(232,182,74,0.08)", border: "1px solid rgba(232,182,74,0.4)", display: "flex", flexDirection: "column", gap: 4 },
   recoveryRow: { display: "flex", alignItems: "center", gap: 6 },

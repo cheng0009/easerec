@@ -46,13 +46,19 @@ export function useRecorderState() {
       const dir = getDirector();
       if (p.is_recording) {
         setRecording({ isRecording: true, elapsedMs: 0, fps: 0 });
+        // Back to the live preview — never replay the previous take here.
+        useStore.getState().setUi({ reviewPath: null });
         await dir.beginRecording();
       } else {
         const savePath = await dir.stopAndSave();
         if (savePath) {
           try { localStorage.setItem("dc_last_save", savePath); } catch {}
+          // Backend-initiated stops (tray etc.) land in review too — the
+          // button and hotkey paths already do this.
+          useStore.getState().setUi({ reviewPath: savePath });
         }
-        setRecording({ isRecording: false, elapsedMs: 0, fps: 0 });
+        // Keep elapsedMs so the review badge shows the recording length.
+        setRecording({ isRecording: false, fps: 0 });
       }
     } catch (e) {
       console.error("Shortcut recording command failed:", e);

@@ -37,7 +37,6 @@
   },
   "export": {
     "title": "📦 导出",
-    "silenceTrim": "静音裁剪",
     "subtitles": "烧录字幕",
     "outputDir": "输出目录",
     "outputPlaceholder": "默认：桌面",

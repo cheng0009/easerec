@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { RecordingState, StudioState, EffectsState, WebcamState, SettingsState, MarksState, SubtitleStyleState, LlmConfigState, UiState } from "./types";
+import type { RecordingState, StudioState, EffectsState, WebcamState, SettingsState, MarksState, SubtitleStyleState, LlmConfigState, UiState, TeleprompterState } from "./types";
 import { DEFAULT_RECORDING_CONFIG } from "../lib/constants";
 
 export interface LanguageState {
@@ -41,6 +41,13 @@ export const DEFAULT_LLM: LlmConfigState = {
   model: "deepseek-chat",
 };
 
+export const DEFAULT_TELEPROMPTER: TeleprompterState = {
+  text: "",
+  fontSize: 56,
+  speed: 10,
+  visible: false,
+};
+
 function loadSettingsFromStorage(): Partial<SettingsState> {
   try {
     const s = localStorage.getItem("dc_app_settings_v3");
@@ -76,30 +83,35 @@ export const useStore = create<AppStore>((set) => ({
   setWebcam: (partial) => set((s) => ({ webcam: { ...s.webcam, ...partial } })),
 
   // Settings
-  settings: {
-    ...DEFAULT_RECORDING_CONFIG,
-    outputDir: "",
-    modelPath: "",
-    silenceThresholdS: 1.5,
-    subtitleEnabled: false,
-    subtitleStyle: DEFAULT_SUBTITLE_STYLE,
-    llm: DEFAULT_LLM,
-    glossary: "",
-    asrLanguage: "zh",
-    loudnorm: false,
-    verticalExport: false,
-    privacyGraceS: 8,
-    ffTargetSecs: [3, 5],
-    introPath: "",
-    introDurationS: 3,
-    outroPath: "",
-    outroDurationS: 3,
-    successSound: true,
-    ...loadSettingsFromStorage(),
-    // Brand outro is a fixed, non-user-editable feature (see ExportDrawer) —
-    // ignore any stale persisted value that would silently skip it.
-    brandOutro: true,
-  },
+  settings: (() => {
+    const persisted = loadSettingsFromStorage();
+    return {
+      ...DEFAULT_RECORDING_CONFIG,
+      outputDir: "",
+      modelPath: "",
+      subtitleEnabled: false,
+      subtitleStyle: DEFAULT_SUBTITLE_STYLE,
+      llm: DEFAULT_LLM,
+      glossary: "",
+      asrLanguage: "zh",
+      loudnorm: false,
+      verticalExport: false,
+      privacyGraceS: 8,
+      ffTargetSecs: [3, 5],
+      introPath: "",
+      introDurationS: 3,
+      outroPath: "",
+      outroDurationS: 3,
+      successSound: true,
+      ...persisted,
+      // Brand outro is a fixed, non-user-editable feature (see ExportDrawer) —
+      // ignore any stale persisted value that would silently skip it.
+      brandOutro: true,
+      // The prompter must never pop open at launch: ignore any persisted
+      // `visible:true` (session-only state).
+      teleprompter: { ...DEFAULT_TELEPROMPTER, ...(persisted.teleprompter ?? {}), visible: false },
+    };
+  })(),
   setSettings: (partial) => set((s) => ({ settings: { ...s.settings, ...partial } })),
 
   // Marks (EDL mirror)
@@ -113,6 +125,7 @@ export const useStore = create<AppStore>((set) => ({
     privacyDrawing: false,
     feedback: null,
     recoverable: [],
+    takeId: 0,
   },
   setMarks: (partial) => set((s) => ({ marks: { ...s.marks, ...partial } })),
 

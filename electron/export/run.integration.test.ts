@@ -44,6 +44,17 @@ function generateInput(file: string, seconds: number): void {
   ], { stdio: "ignore", timeout: 60000 });
 }
 
+function generateImage(file: string): string {
+  execFileSync(FFMPEG, [
+    "-y",
+    "-f", "lavfi", "-i", `testsrc2=size=640x360:rate=15:duration=1`,
+    "-frames:v", "1",
+    "-c:v", "png",
+    file,
+  ], { stdio: "ignore", timeout: 60000 });
+  return file;
+}
+
 function probeDurationSecs(file: string): Promise<number> {
   return new Promise((resolve) => {
     let out = "";
@@ -67,8 +78,6 @@ function baseSettings(): ExportSettings {
     brandLogoPath: "",
     brandTitle: "简录 EaseRec",
     brandSlogan: "简录，让知识输出回归纯粹。",
-    trimSilence: false,
-    silenceThresholdS: 0,
     loudnorm: false,
     subtitles: false,
     subtitleStyle: {
@@ -117,6 +126,29 @@ describe.runIf(hasFfmpeg)("export pipeline (real ffmpeg)", () => {
     expect(await probeDurationSecs(output)).toBeCloseTo(5, 0);
   }, 120000);
 
+  it("image intro/outro render as held frames with the configured duration", async () => {
+    const input = path.join(dir, "img_main.mp4");
+    const output = path.join(dir, "img_concat_out.mp4");
+    const intro = generateImage(path.join(dir, "intro.png"));
+    const outro = generateImage(path.join(dir, "outro.png"));
+    generateInput(input, 4);
+    const settings: ExportSettings = {
+      ...baseSettings(),
+      introEnabled: true, introPath: intro, introDurationS: 3,
+      outroEnabled: true, outroPath: outro, outroDurationS: 2,
+    };
+    const res = await runExportPipeline({
+      inputPath: input, outputPath: output, outDir: dir,
+      edl: emptyEdl(), durationMs: 4000, settings,
+      llmConfig: { enabled: false, baseUrl: "", apiKey: "", model: "" },
+      ctx: ctx(),
+    });
+    expect(res).toContain("Saved to:");
+    expect(existsSync(output)).toBe(true);
+    // 3 + 4 + 2 = 9s
+    expect(await probeDurationSecs(output)).toBeCloseTo(9, 0);
+  }, 120000);
+
   it("applies rewind cut + fast-forward compression end-to-end", async () => {
     // 20s source: cut 2-5s (3s removed), speedup 8-20s (12s -> 5s).
     // Expected output = 2 + 3 + 5 = 10s (+- keyframe rounding).
@@ -139,33 +171,6 @@ describe.runIf(hasFfmpeg)("export pipeline (real ffmpeg)", () => {
     expect(dur).toBeGreaterThan(8.5);
     expect(dur).toBeLessThan(12);
   }, 180000);
-
-  it("silence trimming shortens a recording with a silent gap", async () => {
-    // 3s tone + 3s silence + 3s tone -> trimmed to ~6s.
-    const input = path.join(dir, "silence.mp4");
-    const output = path.join(dir, "silence_out.mp4");
-    execFileSync(FFMPEG, [
-      "-y",
-      "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
-      "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono:duration=3",
-      "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
-      "-filter_complex", "[0:a][1:a][2:a]concat=n=3:v=0:a=1[a]",
-      "-map", "[a]",
-      "-c:a", "aac",
-      input,
-    ], { stdio: "ignore", timeout: 60000 });
-    const settings = { ...baseSettings(), trimSilence: true, silenceThresholdS: 1.5 };
-    const res = await runExportPipeline({
-      inputPath: input, outputPath: output, outDir: dir,
-      edl: emptyEdl(), durationMs: 9000, settings,
-      llmConfig: { enabled: false, baseUrl: "", apiKey: "", model: "" },
-      ctx: ctx(),
-    });
-    expect(res).toContain("Saved to:");
-    const dur = await probeDurationSecs(output);
-    expect(dur).toBeGreaterThan(4);
-    expect(dur).toBeLessThan(7.5);
-  }, 120000);
 
   it("produces a vertical 9:16 derivative from the camera track", async () => {
     const input = path.join(dir, "vert.mp4");

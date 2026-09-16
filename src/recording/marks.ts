@@ -197,11 +197,22 @@ async function handlePrivacyRegion(screenRect: MaskRegion): Promise<void> {
       nowMs: nowMs(),
     });
     st.setMarks({ activePrivacy: { startMs: fallbackStart } });
+    // Merged F6 semantics (the window Shift+F6 used to cover): the grace
+    // window BEFORE the box went up held the privacy content raw — delete it
+    // outright (audio included) instead of merely mosaicking it. The mask
+    // backtrace may still extend the mosaic earlier when the content first
+    // appeared even before this window.
+    const committedMs = nowMs();
+    if (committedMs - fallbackStart >= 200) {
+      await appendEdit({ type: "cut", startMs: fallbackStart, endMs: committedMs, reason: "privacy" });
+    }
     // Show the mosaic at the CLAMPED box's screen position so what the user
     // sees is exactly what gets masked.
     const boxScreen = director.recorder.mapSourceToScreenRegion(rect);
     try { await dcInvoke("overlay_privacy_box", { rect: boxScreen }); } catch { /* ignore */ }
-    feedback(isZhLang() ? "🛡 遮挡已生效 — 屏幕将一直盖住该区域，再按 F6 结束" : "🛡 Mask live — it stays until you press F6 again");
+    feedback(isZhLang()
+      ? `🛡 遮挡已生效，画框前 ${((committedMs - fallbackStart) / 1000).toFixed(0)} 秒已标记剪除 — 再按 F6 结束遮挡`
+      : `🛡 Mask live — the ${((committedMs - fallbackStart) / 1000).toFixed(0)}s before the box is marked for cutting. F6 to end`);
     void res;
   } catch (e) {
     console.error("[marks] privacy_mark_start failed:", e);
@@ -288,6 +299,14 @@ export function installMarksBridge(): void {
       } catch { /* no legacy config */ }
     }
     if (s && typeof s === "object" && Object.keys(s).length > 0) merged = { ...merged, ...s };
+    // Brand outro is a fixed, non-user-editable feature (see store init) — never
+    // let a stale persisted value re-enable/disable it behind the store's back.
+    delete merged.brandOutro;
+    // The prompter must never pop open at launch: `visible` is session-only
+    // state (persisted settings only know the text/size/speed).
+    if (merged.teleprompter && typeof merged.teleprompter === "object") {
+      merged.teleprompter = { ...(merged.teleprompter as object), visible: false } as SettingsState["teleprompter"];
+    }
     if (Object.keys(merged).length > 0) useStore.getState().setSettings(merged);
   }).catch(() => {});
 }
@@ -302,6 +321,7 @@ export function resetMarksForNewRecording(webmPath: string | null): void {
     activePause: null,
     activeFF: null,
     privacyDrawing: false,
+    takeId: useStore.getState().marks.takeId + 1,
   });
   useStore.getState().setRecording({ isPaused: false, pausedMs: 0 });
 }

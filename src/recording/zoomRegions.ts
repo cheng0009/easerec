@@ -41,6 +41,10 @@ export interface RegionOptions {
   mergeGapMs: number;
   /** Regions shorter than this are dropped. */
   minRegionMs: number;
+  /** Hard cap on regions per recording — every region expands into 3-5
+   *  ffmpeg stages (zoom in / hold / glide / zoom out), each a separate
+   *  encode process; past ~20 the export cost dwarfs the storytelling. */
+  maxRegions: number;
 }
 
 /**
@@ -65,6 +69,7 @@ export const DEFAULT_REGION_OPTIONS: RegionOptions = {
   holdMs: 1200, // stay zoomed a moment after the last activity (exit delay)
   mergeGapMs: CONNECTED_ZOOM_GAP_MS,
   minRegionMs: 1500,
+  maxRegions: 20,
 };
 
 interface Cluster {
@@ -164,6 +169,17 @@ export function detectZoomRegions(
       if (r.startMs < prev.endMs) r.startMs = prev.endMs;
     }
     if (r.endMs - r.startMs >= o.minRegionMs) out.push(r);
+  }
+
+  // Keep the LONGEST dwells when the mouse sprayed more micro-regions than
+  // the render budget allows (chronological order preserved).
+  if (out.length > o.maxRegions) {
+    const keep = new Set(
+      [...out]
+        .sort((a, b) => (b.endMs - b.startMs) - (a.endMs - a.startMs))
+        .slice(0, o.maxRegions),
+    );
+    return out.filter((r) => keep.has(r));
   }
   return out;
 }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   bitrateFor,
+  brandLayout,
   burnStage,
   coalesceBurnRects,
   concatArgs,
@@ -31,8 +32,6 @@ const baseSettings = (): ExportSettings => ({
   brandLogoPath: "",
   brandTitle: "简录 EaseRec",
   brandSlogan: "简录，让知识输出回归纯粹。",
-  trimSilence: false,
-  silenceThresholdS: 0,
   loudnorm: false,
   subtitles: false,
   subtitleStyle: {
@@ -130,16 +129,17 @@ describe("planExport", () => {
   });
 
   it("orders audio pass -> asr hook -> burn when subtitles are on", () => {
-    const settings = { ...baseSettings(), trimSilence: true, silenceThresholdS: 1.5, loudnorm: true, subtitles: true };
+    const settings = { ...baseSettings(), loudnorm: true, subtitles: true };
     const plan = planExport({
       inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
       edl: emptyEdl(), durationMs: 60000, settings,
     });
     expect(kindsOf(plan.stages)).toEqual(["audio", "transcode", "asr", "burn", "transcode"]);
-    // audio filters chain silenceremove + loudnorm
+    // audio filters chain loudnorm only (silence trim was removed — recording
+    // legitimately allows long no-speech stretches, so auto-cropping is unsafe)
     const audioArgs = plan.stages[0].args!;
     const af = audioArgs[audioArgs.indexOf("-af") + 1];
-    expect(af).toContain("silenceremove=stop_periods=-1:stop_threshold=0.015");
+    expect(af).not.toContain("silenceremove");
     expect(af).toContain("loudnorm=I=-16:TP=-1.5:LRA=11");
     // wav extraction feeds the ASR hook
     expect(plan.stages[1].output).toContain("audio16k.wav");
@@ -168,6 +168,22 @@ describe("planExport", () => {
     });
     expect(kindsOf(plan.stages)).toEqual(["final-concat", "transcode"]);
     expect(plan.stages[0].inputs).toEqual(["C:/assets/intro.mp4", "C:/rec/r.webm", "C:/assets/outro.mp4"]);
+    expect(plan.stages[0].partDurations).toEqual([0, 0, 0]); // all videos: duration inherited
+  });
+
+  it("still-image intro/outro get their own hold duration in final concat", () => {
+    const settings = {
+      ...baseSettings(),
+      introEnabled: true, introPath: "C:/assets/intro.png", introDurationS: 3,
+      outroEnabled: true, outroPath: "C:/assets/outro.jpg", outroDurationS: 5,
+    };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings,
+    });
+    const fc = plan.stages.find((st) => st.kind === "final-concat")!;
+    expect(fc.inputs).toEqual(["C:/assets/intro.png", "C:/rec/r.webm", "C:/assets/outro.jpg"]);
+    expect(fc.partDurations).toEqual([3, 0, 5]);
   });
 
   it("appends a generated brand outro as the very last concat part", () => {
@@ -183,7 +199,7 @@ describe("planExport", () => {
     expect(all).toContain("color=c=0x0a0a0f");
     expect(all).toContain("anullsrc=r=48000:cl=stereo:d=2.8");
     expect(all).toContain("drawtext=fontfile='C\\:/Windows/Fonts/msyh.ttc'");
-    expect(all).toContain("text='简录 EaseRec'");
+    expect(all).toMatch(/让\s*知\s*识\s*输\s*出\s*回\s*归\s*纯\s*粹/);
     const fc = plan.stages.find((st) => st.kind === "final-concat")!;
     expect(fc.inputs![fc.inputs!.length - 1]).toContain("brand.mp4");
   });
@@ -212,12 +228,30 @@ describe("planExport", () => {
     expect(logoPass.args).toContain("C:/brand/logo.png");
     const filter = logoPass.args![logoPass.args!.indexOf("-filter_complex") + 1];
     expect(filter).toContain("[1:v]scale=");
-    expect(filter).toContain("[0:v][lg]overlay=x=(W-w)/2:y=H*0.37-h:shortest=1[v]");
+    expect(filter).toContain("fade=t=in:st=0.25:d=0.8:alpha=1");
+    expect(filter).toMatch(/\[0:v\]\[lg\]overlay=x=\d+:y=\d+:shortest=1\[v\]/);
     expect(filter).not.toContain("drawtext");
     const textStage = brands[0];
     expect(textStage.args).toContain("-vf");
     expect(textStage.args).not.toContain("-filter_complex");
     expect(textStage.args).not.toContain("-loop");
+  });
+
+  it("justifies the Chinese slogan to the English line width (both orientations)", () => {
+    const zh = "让知识输出回归纯粹";
+    const en = "Let knowledge output return to purity.";
+    for (const [w, h] of [[1920, 1080], [1080, 1920]] as const) {
+      const L = brandLayout(w, h, zh, en);
+      expect(L.justifiedSlogan).not.toBe(zh);
+      expect(L.justifiedSlogan).toMatch(/让\s+知\s+识/);
+      if (!L.portrait) {
+        expect(L.textLeft).toBeGreaterThan(L.logoX + L.logoW);
+        expect(L.zhYExpr).toContain("(h-text_h)/2");
+      } else {
+        expect(L.zhY).toBeGreaterThan(L.logoY + L.logoH);
+        expect(L.logoX).toBe(Math.round((w - L.logoW) / 2));
+      }
+    }
   });
 
   it("appends a vertical stage derived from the final output", () => {
@@ -251,7 +285,7 @@ describe("privacy mask burn", () => {
     expect(burn.args).toContain("[vout]");
     // mosaic cells pixelate the rect content: downscale area + upscale neighbor
     const f = filterOf(burn.args!);
-    expect(f).toContain("crop=w=1920:h=648:x=960:y=432");
+    expect(f).toContain("crop=w=1920:h=648:x='960*between(t,5.000,60.000)':y='432*between(t,5.000,60.000)'");
     expect(f).toContain("scale=160:54:flags=area");
     expect(f).toContain("scale=1920:648:flags=neighbor");
     // masked window is the SOURCE timeline [backtrace start, recording end]
@@ -287,7 +321,7 @@ describe("privacy mask burn", () => {
     expect(input).toContain("cropped.mp4");
     // normalized full-frame 0.35 -> crop-space 0.5; pixels on 1920x1080 crop
     const f = filterOf(burn.args!);
-    expect(f).toContain("crop=w=768:h=432:x=960:y=540");
+    expect(f).toContain("crop=w=768:h=432:x='960*between(t,2.000,60.000)':y='540*between(t,2.000,60.000)'");
   });
 
 it("masks before slicing so cuts keep the mosaic on the kept footage", () => {
@@ -314,14 +348,12 @@ it("masks before slicing so cuts keep the mosaic on the kept footage", () => {
     expect(burn.kind).toBe("maskburn");
     const f = filterOf(burn.args!);
     // static full-window mosaic for [startMs -> end] stays
-    expect(f).toContain("enable='between(t,5.000,60.000)'");
+    expect(f).toContain("enable='between(t,5.000,60.000)+between(t,0.300,1.700)'");
     // occurrence mosaic with a padded window around [0.8s, 1.2s]
-    expect(f).toContain("enable='between(t,0.300,1.700)'");
-    // mapped into pixels on the 3840x2160 burn input
-    expect(f).toContain("crop=w=768:h=216:x=384:y=432");
+    expect(f).toContain("crop=w=768:h=216:x='1920*between(t,5.000,60.000)+384*between(t,0.300,1.700)':y='1080*between(t,5.000,60.000)+432*between(t,0.300,1.700)'");
   });
 
-  it("chains multiple masks through successive splits", () => {
+  it("merges same-size masks into one grouped pass", () => {
     const edl = appendEdit(
       appendEdit(emptyEdl(), mask(1000, 6000, { x: 0.2, y: 0.2, w: 0.3, h: 0.3 })),
       mask(8000, 12000, { x: 0.6, y: 0.6, w: 0.3, h: 0.3 }),
@@ -331,8 +363,10 @@ it("masks before slicing so cuts keep the mosaic on the kept footage", () => {
       edl, durationMs: 60000, settings: baseSettings(),
     });
     const f = filterOf(plan.stages[0].args!);
-    expect(f).toContain("[o0]split=2[s1][t1]");
-    expect(f).toContain("enable='between(t,8.000,60.000)'[vout]");
+    // Same-size rects share ONE crop/pixelate pass — the x/y/enable
+    // expressions carry one between() term per rect.
+    expect(f).toContain("enable='between(t,1.000,60.000)+between(t,8.000,60.000)'");
+    expect(f).toContain("'768*between(t,1.000,60.000)+2304*between(t,8.000,60.000)'");
   });
 });
 

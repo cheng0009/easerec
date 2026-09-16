@@ -77,6 +77,8 @@ let appQuitting = false;
 
 let miniContents: Electron.WebContents | null = null;
 let mainContents: Electron.WebContents | null = null;
+let prompterWindow: BrowserWindow | null = null;
+let prompterContents: Electron.WebContents | null = null;
 let overlayWindow: BrowserWindow | null = null;
 let overlayContents: Electron.WebContents | null = null;
 // While any annotation effect is visible the transparent overlay must swallow
@@ -98,6 +100,11 @@ let captureSourceId: string | null = null;
 let regionSelectWait: ((v: { x: number; y: number; w: number; h: number } | null) => void) | null = null;
 /** Win32 GetWindowRect (koffi), for mapping window capture geometry. */
 let getWindowRect: ((hwnd: number, rect: Record<string, number>) => boolean) | null = null;
+/** Win32 SetWindowDisplayAffinity (koffi), to keep the floating teleprompter
+ *  out of screen capture (WDA_EXCLUDEFROMCAPTURE) — the prompter window must
+ *  never appear inside a shared screen while the user records. */
+let setWindowDisplayAffinity: ((hwnd: number, affinity: number) => boolean) | null = null;
+const WDA_EXCLUDEFROMCAPTURE = 0x00000011;
 try {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const koffiMod = require("koffi") as unknown as {
@@ -107,6 +114,7 @@ try {
   const user32 = koffiMod.load("user32.dll");
   koffiMod.struct("DC_RECT", { left: "long", top: "long", right: "long", bottom: "long" });
   getWindowRect = user32.func("bool GetWindowRect(int hwnd, _Out_ DC_RECT *rect)") as typeof getWindowRect;
+  setWindowDisplayAffinity = user32.func("bool SetWindowDisplayAffinity(int hwnd, uint dwAffinity)") as typeof setWindowDisplayAffinity;
 } catch (e) {
   console.warn("[directorcam] GetWindowRect unavailable — window privacy mapping disabled", e);
 }
@@ -374,6 +382,129 @@ function resetOverlayPrivacyState(): void {
   pushOverlay("ov-privacy-box", { rect: null });
 }
 
+// --- Floating teleprompter --------------------------------------------------
+// A small always-on-top, frameless, transparent window that scrolls the user's
+// script above the presentation. It is EXCLUDED from screen capture (Win32
+// SetWindowDisplayAffinity WDA_EXCLUDEFROMCAPTURE) so it never appears inside a
+// recording. The main process keeps the authoritative `prompterState`; the main
+// renderer page drives it via `teleprompter_set`, and the prompter page echoes
+// its own font/speed/close edits back through the same channel.
+function defaultPrompterState() {
+  return { text: "", fontSize: 48, speed: 8, visible: false };
+}
+let prompterState = defaultPrompterState();
+
+/** Push an event to the floating teleprompter page (silently while absent). */
+function pushPrompter(event: string, data: unknown): void {
+  if (prompterContents && !prompterContents.isDestroyed()) {
+    try {
+      prompterContents.send("dc-event", { event, data });
+    } catch { /* ignore */ }
+  }
+}
+
+/** Create (once) the floating, capture-excluded teleprompter window. */
+function ensurePrompterWindow(): BrowserWindow | null {
+  if (prompterWindow && !prompterWindow.isDestroyed()) return prompterWindow;
+  const disp = screen.getPrimaryDisplay();
+  const wa = disp.workArea;
+  const win = new BrowserWindow({
+    width: 480,
+    height: 300,
+    minWidth: 240,
+    minHeight: 120,
+    frame: false,
+    transparent: true,
+    resizable: true,
+    movable: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    alwaysOnTop: true,
+    show: false,
+    backgroundColor: "#00000000",
+    icon: APP_ICON,
+    title: "提词器",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+    },
+  });
+  win.setAlwaysOnTop(true, "screen-saver");
+  // Restore the user's last bounds, else default to the top-center of the
+  // primary display (above the center of the presentation).
+  try {
+    const saved = loadSettings().prompter_bounds;
+    if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+      const b = saved as Record<string, unknown>;
+      if ([b.x, b.y, b.width, b.height].every((v) => typeof v === "number")) {
+        win.setBounds({ x: b.x as number, y: b.y as number, width: b.width as number, height: b.height as number });
+      }
+    }
+  } catch { /* ignore */ }
+  if (!win.getBounds().x && !win.getBounds().y) {
+    win.setPosition(Math.round(wa.x + wa.width / 2 - 240), Math.round(wa.y + wa.height * 0.05));
+  }
+  win.on("close", () => { prompterWindow = null; prompterContents = null; });
+  win.on("moved", savePrompterBoundsLater);
+  win.on("resized", savePrompterBoundsLater);
+  // Self-heal: a crashed prompter page is torn down so F2 re-creates a live one.
+  win.webContents.on("render-process-gone", () => { try { win.destroy(); } catch { /* ignore */ } });
+  win.webContents.once("did-finish-load", () => {
+    prompterContents = win.webContents;
+    // Replay the authoritative state (a window created on demand must never
+    // start blank or with a stale visibility).
+    pushPrompter("teleprompter-state", { ...prompterState });
+  });
+  prompterWindow = win;
+  // Exclude from capture as soon as the OS window exists. getDisplayMedia with
+  // Windows Graphics Capture honors WDA_EXCLUDEFROMCAPTURE, so the prompter
+  // floating above a shared screen never shows up in the recording.
+  if (setWindowDisplayAffinity) {
+    try {
+      const handle = win.getNativeWindowHandle() as Buffer;
+      setWindowDisplayAffinity(handle.readUInt32LE(0), WDA_EXCLUDEFROMCAPTURE);
+    } catch (e) {
+      console.warn("[directorcam] prompter capture exclusion failed", e);
+    }
+  }
+  if (isDev) {
+    void win.loadURL(`${DEV_URL}/prompter.html`);
+  } else {
+    void win.loadFile(path.join(projectPath("dist"), "prompter.html"));
+  }
+  return win;
+}
+
+/** Debounced persistence of the prompter window bounds (drag/resize). */
+let prompterBoundsTimer: ReturnType<typeof setTimeout> | null = null;
+function savePrompterBoundsLater(): void {
+  if (prompterBoundsTimer) clearTimeout(prompterBoundsTimer);
+  prompterBoundsTimer = setTimeout(() => {
+    prompterBoundsTimer = null;
+    if (prompterWindow && !prompterWindow.isDestroyed()) {
+      saveSettings({ prompter_bounds: prompterWindow.getBounds() });
+    }
+  }, 300);
+}
+
+/** Show/hide the prompter. Showing never steals focus from the presentation. */
+function setPrompterVisible(visible: boolean): void {
+  const win = prompterWindow && !prompterWindow.isDestroyed() ? prompterWindow : null;
+  if (visible) {
+    const created = ensurePrompterWindow();
+    if (created) {
+      try { created.showInactive(); } catch { /* ignore */ }
+    }
+  } else if (win) {
+    try { win.hide(); } catch { /* ignore */ }
+  }
+}
+
 function makeWindow(opts: { mini?: boolean } = {}): BrowserWindow {
   const win = new BrowserWindow({
     width: opts.mini ? 252 : 1280,
@@ -413,6 +544,7 @@ function makeWindow(opts: { mini?: boolean } = {}): BrowserWindow {
     // actually quits, then `window-all-closed` fires app.quit().
     win.on("closed", () => {
       if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.destroy();
+      if (prompterWindow && !prompterWindow.isDestroyed()) prompterWindow.destroy();
     });
   }
 
@@ -482,7 +614,7 @@ function registerIpc(): void {
   // Generic command invoke (page -> main).
   ipcMain.handle("dc-invoke", async (_event, cmd: string, args: Record<string, unknown>) => {
     try {
-      return { ok: true, data: await handleInvoke(cmd, args ?? {}) };
+      return { ok: true, data: await handleInvoke(cmd, args ?? {}, _event) };
     } catch (e) {
       return { ok: false, error: String(e) };
     }
@@ -523,11 +655,14 @@ function registerIpc(): void {
 
   ipcMain.handle("__dc_window_exists", async (_e, data: { label?: string }) => {
     if (data?.label === "mini") return !!miniWindow;
+    if (data?.label === "prompter") return !!prompterWindow;
     return false;
   });
 
   ipcMain.handle("__dc_window_property", async (_e, data: { label?: string; prop: string }) => {
-    const win = data?.label === "mini" ? miniWindow : mainWindow;
+    const win = data?.label === "mini" ? miniWindow
+      : data?.label === "prompter" ? (prompterWindow && !prompterWindow.isDestroyed() ? prompterWindow : null)
+      : mainWindow;
     if (!win) return false;
     switch (data.prop) {
       case "isMinimized":
@@ -544,9 +679,19 @@ function registerIpc(): void {
     if (label === "mini" && !miniWindow) {
       miniWindow = makeWindow({ mini: true });
     }
-    const target = label === "mini" ? miniWindow : mainWindow;
+    if (label === "prompter" && !prompterWindow) {
+      ensurePrompterWindow();
+    }
+    let target = label === "mini" ? miniWindow
+      : label === "prompter" ? prompterWindow
+      : mainWindow;
     if (!target) return;
     switch (data?.action) {
+      case "close":
+        // The prompter "closes" by hiding (F2 can bring it right back).
+        if (label === "prompter") { setPrompterVisible(false); return; }
+        target.close();
+        break;
       case "minimize": target.minimize(); break;
       case "unminimize":
         // The window may have been hidden (minimize → preventDefault + hide),
@@ -558,7 +703,6 @@ function registerIpc(): void {
       case "hide": target.hide(); break;
       case "show": target.show(); break;
       case "focus": target.focus(); break;
-      case "close": target.close(); break;
       case "alwaysOnTop": target.setAlwaysOnTop(!!data.v); break;
       case "position": target.setPosition(Number(data.x), Number(data.y)); break;
       case "size": target.setSize(Number(data.w), Number(data.h)); break;
@@ -571,10 +715,14 @@ function registerIpc(): void {
     if (opts?.directory) props.push("openDirectory");
     else props.push("openFile");
     if (opts?.multiple) props.push("multiSelections");
+    const filters = Array.isArray(opts?.filters) && opts.filters.length > 0
+      ? (opts.filters as { name: string; extensions: string[] }[]).map((f) => ({ name: f.name, extensions: f.extensions }))
+      : undefined;
     const res = mainWindow
-      ? await dialog.showOpenDialog(mainWindow, { properties: props })
-      : await dialog.showOpenDialog({ properties: props });
-    return res ?? null;
+      ? await dialog.showOpenDialog(mainWindow, { properties: props, filters })
+      : await dialog.showOpenDialog({ properties: props, filters });
+    if (!res || res.canceled) return null;
+    return opts?.multiple ? res.filePaths : (res.filePaths[0] ?? null);
   });
 
   ipcMain.handle("__dc_save_dialog", async (_e, opts) => {
@@ -722,8 +870,33 @@ function handleCall(type: string, payload: unknown): unknown {
   }
 }
 
-async function handleInvoke(cmd: string, args: Record<string, unknown>): Promise<unknown> {
+async function handleInvoke(cmd: string, args: Record<string, unknown>, _event?: Electron.IpcMainInvokeEvent): Promise<unknown> {
   switch (cmd) {
+    case "teleprompter_set": {
+      const raw = (args.state && typeof args.state === "object" ? args.state : {}) as Record<string, unknown>;
+      const next = { ...prompterState };
+      if (typeof raw.text === "string") next.text = raw.text;
+      if (typeof raw.fontSize === "number" && Number.isFinite(raw.fontSize) && raw.fontSize >= 10 && raw.fontSize <= 200) next.fontSize = raw.fontSize;
+      else if (raw.fontSize !== undefined) next.fontSize = Math.min(200, Math.max(10, Math.round(Number(raw.fontSize) || next.fontSize)));
+      if (typeof raw.speed === "number" && Number.isFinite(raw.speed) && raw.speed >= 0) next.speed = raw.speed;
+      else if (raw.speed !== undefined) next.speed = Math.max(0, Number(raw.speed) || next.speed);
+      if (typeof raw.visible === "boolean") next.visible = raw.visible;
+      const changed = next.text !== prompterState.text || next.fontSize !== prompterState.fontSize
+        || next.speed !== prompterState.speed || next.visible !== prompterState.visible;
+      if (!changed) return { visible: prompterState.visible };
+      prompterState = next;
+      // Edits made inside the prompter page echo back to the main renderer so
+      // the panel stays in sync (font size / speed / hide). Main-page edits
+      // only flow outward — no echo loop.
+      const fromPrompter = !!(_event && prompterContents && _event.sender === prompterContents);
+      if (fromPrompter) pushEvent("teleprompter-state", { ...prompterState });
+      pushPrompter("teleprompter-state", { ...prompterState });
+      setPrompterVisible(prompterState.visible);
+      return { visible: prompterState.visible };
+    }
+    case "teleprompter_get": {
+      return { ...prompterState };
+    }
     case "check_ffmpeg":
       return !!resolveFfmpeg();
 
@@ -1180,6 +1353,33 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>): Promise
       return !!bin;
     }
 
+    // --- Hotword extraction: mine the last transcript for glossary candidates
+    case "extract_hotwords": {
+      const { extractHotwords } = await import("./subtitles/hotwords");
+      const transcriptPath = String(args.transcriptPath || "");
+      if (!fs.existsSync(transcriptPath)) return { error: "missing-transcript" };
+      let segments: { text: string }[] = [];
+      try {
+        segments = (JSON.parse(fs.readFileSync(transcriptPath, "utf8")) as { text?: unknown }[])
+          .filter((s) => s && typeof s.text === "string")
+          .map((s) => ({ text: String(s.text) }));
+      } catch { return { error: "bad-transcript" }; }
+      const llm = (args.llm ?? {}) as Record<string, unknown>;
+      const hotwords = await extractHotwords(
+        segments,
+        {
+          enabled: llm.enabled === true,
+          baseUrl: String(llm.baseUrl || ""),
+          apiKey: String(llm.apiKey || ""),
+          model: String(llm.model || ""),
+          glossary: String(args.glossary || ""),
+        },
+        fetch,
+      );
+      if (!hotwords) return { error: "llm" };
+      return { hotwords };
+    }
+
     // --- Chapter / metadata generation (needs a prior subtitle export) ------
     case "generate_chapters": {
       const { generateVideoMetadata, metadataToMarkdown } = await import("./subtitles/chapters");
@@ -1203,6 +1403,17 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>): Promise
       const mdPath = transcriptPath.replace(/\.transcript\.json$/, "") + "_info.md";
       try { fs.writeFileSync(mdPath, metadataToMarkdown(meta), "utf8"); } catch { /* ignore */ }
       return { ...meta, markdownPath: mdPath };
+    }
+
+    case "test_llm": {
+      const { testLlmConnection } = await import("./subtitles/llm");
+      const llm = (args.llm ?? {}) as Record<string, unknown>;
+      return testLlmConnection({
+        enabled: true,
+        baseUrl: String(llm.baseUrl || ""),
+        apiKey: String(llm.apiKey || ""),
+        model: String(llm.model || ""),
+      }, fetch);
     }
 
     case "export_video":
@@ -1267,12 +1478,12 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
     .map((f) => path.join(process.env.WINDIR || "C:\Windows", "Fonts", f))
     .find((f) => fs.existsSync(f)) ?? "";
   const brandZh = config.brand_lang !== "en";
-  // Brand logo: the bundled EaseRec mark is part of the outro design
-  // (dev: src/assets; packaged: extraResources/brand). If missing, text-only card.
+  // Brand mark for the outro card (the original white-background mark; the
+  // card keeps it as-is per design): dev uses the repo asset, packaged ships
+  // it via extraResources.
   const brandLogo = (() => {
     for (const cand of [
       projectPath("src-tauri", "brand", "easerec-logo.png"),
-      projectPath("src", "assets", "easerec.png"),
       process.resourcesPath
         ? path.join(process.resourcesPath, "brand", "easerec-logo.png")
         : "",
@@ -1289,9 +1500,8 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
     brandFontPath: brandFont,
     brandLogoPath: brandLogo,
     brandTitle: brandZh ? "简录 EaseRec" : "EaseRec",
-    brandSlogan: brandZh ? "简录，让知识输出回归纯粹。" : "Recording, simplified.",
-    trimSilence: !!config.trim_silence && Number(config.silence_threshold_s) > 0,
-    silenceThresholdS: Number(config.silence_threshold_s) || 0,
+    brandSlogan: brandZh ? "让知识输出回归纯粹" : "Recording, simplified.",
+    brandSloganEn: brandZh ? "Let knowledge output return to purity." : "",
     loudnorm: config.loudnorm === true,
     subtitles: config.burn_subtitles === true,
     subtitleStyle: {
@@ -1369,6 +1579,7 @@ function defaultShortcuts() {
   return {
     toggle_recording: { key: "F9", modifiers: [] },
     toggle_studio: { key: "F1", modifiers: [] },
+    toggle_prompter: { key: "F2", modifiers: [] },
     toggle_ff: { key: "F4", modifiers: [] },
     toggle_privacy: { key: "F6", modifiers: [] },
     toggle_privacy_cut: { key: "F6", modifiers: ["SHIFT"] },
@@ -1430,6 +1641,7 @@ function shortcutItemFor(cmd: string): { key: string; modifiers?: string[] } | u
   switch (cmd) {
     case "toggle-recording": return cfg.toggle_recording;
     case "toggle-studio": return cfg.toggle_studio;
+    case "toggle-prompter": return cfg.toggle_prompter;
     case "toggle-ff": return cfg.toggle_ff;
     case "toggle-privacy": return cfg.toggle_privacy;
     case "toggle-privacy-cut": return cfg.toggle_privacy_cut;
@@ -1475,6 +1687,7 @@ function registerGlobalShortcuts(): void {
   const bindings: { cmd: string; accel: string }[] = [
     { cmd: "toggle-recording", accel: buildAccelerator(cfg.toggle_recording.key, cfg.toggle_recording.modifiers ?? []) },
     { cmd: "toggle-studio", accel: buildAccelerator(cfg.toggle_studio.key, cfg.toggle_studio.modifiers ?? []) },
+    { cmd: "toggle-prompter", accel: buildAccelerator(cfg.toggle_prompter.key, cfg.toggle_prompter.modifiers ?? []) },
     { cmd: "toggle-ff", accel: buildAccelerator(cfg.toggle_ff.key, cfg.toggle_ff.modifiers ?? []) },
     { cmd: "toggle-privacy", accel: buildAccelerator(cfg.toggle_privacy.key, cfg.toggle_privacy.modifiers ?? []) },
     { cmd: "toggle-privacy-cut", accel: buildAccelerator(cfg.toggle_privacy_cut.key, cfg.toggle_privacy_cut.modifiers ?? []) },

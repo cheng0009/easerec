@@ -10,7 +10,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { concatArgs, concatListContent, encArgs, planExport, verticalArgs, verticalGeometry, type ExportSettings } from "./plan";
+import { concatArgs, concatListContent, encArgs, ENCODER_CANDIDATES, planExport, setPreferredVideoEnc, verticalArgs, verticalGeometry, type EncoderChoice, type ExportSettings } from "./plan";
 import { detectZoomRegions } from "../../src/recording/zoomRegions";
 import { generateAss } from "../subtitles/ass";
 import { segmentsToCues, type WhisperSegment } from "../subtitles/cues";
@@ -175,8 +175,55 @@ export function readCamTrack(camTrackPath: string): CameraSample[] {
  * Full orchestrator. Returns the user-facing result string ("Saved to: path"
  * on success so the existing UI keeps working, an error description otherwise).
  */
+let encoderProbed = false;
+
+/** Probe hardware H.264 encoders once per process, best first. Being listed
+ *  by "-encoders" proves nothing (a compiled-in nvenc still fails with no
+ *  NVIDIA GPU), so each candidate must pass a real 3-frame encode. */
+async function detectVideoEncoder(ffmpegPath: string): Promise<void> {
+  if (encoderProbed) return;
+  encoderProbed = true;
+  let pick: EncoderChoice | null = null;
+  for (const c of ENCODER_CANDIDATES) {
+    const { ok } = await execFfmpeg(ffmpegPath, [
+      "-y", "-f", "lavfi", "-i", "color=c=black:s=320x320:r=30",
+      "-frames:v", "3", ...c.args(2), "-pix_fmt", "yuv420p", "-f", "null", "-",
+    ], undefined, undefined, 8000);
+    if (ok) { pick = c; break; }
+  }
+  setPreferredVideoEnc(pick);
+  console.log(pick ? `[export] hardware encoder: ${pick.name}` : "[export] no hardware encoder — using libopenh264 (software)");
+}
+
+/** Relay ffmpeg's `time=` into throttled stage progress so a long re-encode
+ *  doesn't look frozen. Output time underestimates when cuts removed head
+ *  time — fine, it's a liveness signal, not a clock. */
+function ffmpegProgressRelay(
+  req: RunExportRequest, label: string, index: number, total: number,
+): ((line: string) => void) | undefined {
+  const duration = req.durationMs;
+  if (!duration || duration <= 0) return undefined;
+  let lastPct = -1;
+  let lastAt = 0;
+  return (line: string) => {
+    const now = Date.now();
+    if (now - lastAt < 800) return;
+    const m = line.match(/time=(\d+):(\d{2}):(\d{2}(?:\.\d+)?)/);
+    if (!m) return;
+    lastAt = now;
+    const ms = ((+m[1] * 3600) + (+m[2] * 60) + Number(m[3])) * 1000;
+    const pct = Math.max(0, Math.min(99, Math.round((ms / duration) * 100)));
+    if (pct > lastPct) {
+      lastPct = pct;
+      req.ctx.onProgress(`${label} ${pct}%`, index, total);
+    }
+  };
+}
+
 export async function runExportPipeline(req: RunExportRequest): Promise<string> {
   const { ctx } = req;
+  // Before any stage runs: hardware-vs-software decides minutes vs hours.
+  await detectVideoEncoder(ctx.ffmpegPath);
   const workDir = path.join(req.outDir, ".dc-export-work");
   fs.mkdirSync(workDir, { recursive: true });
 
@@ -235,7 +282,12 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
       // true first appearance and the static burn closes the leak.
       const edits = req.edl.edits.slice();
       let patched = 0;
-      for (const m of maskEdits) {
+      // Per-mask export-time backtrace — spawn-per-probe (yields naturally),
+      // but with many masks it still takes a while: surface it.
+      ctx.onProgress(`回溯 ${maskEdits.length} 个遮挡的起点`, 0, 1);
+      for (let mi = 0; mi < maskEdits.length; mi++) {
+        const m = maskEdits[mi];
+        if (mi % 3 === 0) ctx.onProgress(`回溯遮挡起点 ${mi + 1}/${maskEdits.length}`, 0, 1);
         let ref = { refRegionHash: m.refRegionHash ?? "", refPixels: m.refPixels ?? "" };
         let canonFrame: GrayFrame | null = null;
         if (m.drawnAtMs && m.drawnAtMs > 0) {
@@ -277,11 +329,25 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
         exportEdl = { ...req.edl, edits };
         ctx.onLog?.(`[track] backtrace (export) extended ${patched} mask start(s) to their first appearance`);
       }
+      // fps 4 vs the old 10: occurrence runs merge ~1s gaps, so 4 samples/sec
+      // lose nothing meaningful while cutting the scan work well over half.
+      const scanProgress = (label: string) => {
+        let lastPct = -1;
+        return (frames: number) => {
+          const pct = req.durationMs > 0
+            ? Math.min(99, Math.round((frames * 250) / req.durationMs * 100))
+            : 0;
+          if (pct !== lastPct) { lastPct = pct; ctx.onProgress(`${label} ${pct}%`, 0, 1); }
+        };
+      };
       const scan = await scanPrivacyOccurrences({
         inputPath,
         ffmpegPath: ctx.ffmpegPath,
         durationMs: req.durationMs,
         masks,
+        fps: 4,
+        timeoutMs: 600_000,
+        onProgress: scanProgress("扫描遮罩出现点"),
       });
       let runs = scan.runs;
       ctx.onLog?.(`[track] occurrence scan: ${scan.framesScanned} frames, ${runs.reduce((n, r) => n + r.length, 0)} occurrences`);
@@ -301,6 +367,9 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
           coarseStride: 24,
           maxHits: 20,
           runGapMs: 600,
+          fps: 4,
+          timeoutMs: 600_000,
+          onProgress: scanProgress("补扫遮罩出现点"),
         });
         runs = runs.map((rl, i) => (emptyIdx.includes(i) ? mergeRuns(rl, recall.runs[i] ?? []) : rl));
         ctx.onLog?.(`[track] recall total: ${runs.reduce((n, r) => n + r.length, 0)} occurrences`);
@@ -331,18 +400,43 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
     console.error("[plan]", JSON.stringify(plan.stages.map((st) => ({ k: st.kind, l: st.label, out: st.output })), null, 1));
   }
   const assFile = plan.stages.find((s) => s.kind === "asr")?.output ?? null;
+  // Zoom spans are mutually independent (same input, separate outputs) and a
+  // long timeline spawns dozens of them — running them SEQUENTIALLY wastes
+  // wall-clock on per-process seek/decode/session overhead. A small pool
+  // (3 stays inside consumer NVENC session limits) cuts that ~3x.
+  const ZOOM_POOL = 3;
   let i = 0;
 
-  for (const stage of plan.stages) {
+  for (let si = 0; si < plan.stages.length; si++) {
+    const stage = plan.stages[si];
     ctx.onProgress(stage.label, i++, total);
-    switch (stage.kind) {
-      case "zoomspan": {
-        // Static-crop zoom span (Recordly-style). Fully self-contained args.
-        const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, stage.args!, ctx.onLog, stage.cwd);
-        if (!ok) return `Export failed at: ${stage.label}
+
+    if (stage.kind === "zoomspan") {
+      // Gather the contiguous zoomspan run and render it concurrently.
+      let sj = si;
+      while (sj < plan.stages.length && plan.stages[sj].kind === "zoomspan") sj++;
+      const batch = plan.stages.slice(si, sj);
+      let done = 0;
+      let failure: string | null = null;
+      let cursor = 0;
+      const worker = async (): Promise<void> => {
+        while (cursor < batch.length && !failure) {
+          const st = batch[cursor++];
+          const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, st.args!, ctx.onLog, st.cwd);
+          done++;
+          ctx.onProgress(`缩放片段 ${done}/${batch.length}`, Math.min(total - 1, si + done), total);
+          if (!ok) failure = `Export failed at: ${st.label}
 ${tail}`;
-        break;
-      }
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(ZOOM_POOL, batch.length) }, worker));
+      if (failure) return failure;
+      i = sj;
+      si = sj - 1; // the for-loop's si++ resumes at the first non-zoomspan stage
+      continue;
+    }
+
+    switch (stage.kind) {
       case "concat": {
         // EDL segment list: uniform params -> demuxer stream copy is exact.
         fs.writeFileSync(stage.listFile!, concatListContent(stage.inputs!), "utf8");
@@ -362,12 +456,28 @@ ${tail}`;
         const W = plan.outputSize.w;
         const H = plan.outputSize.h;
         const F = Math.max(1, Math.round(req.settings.fps));
+        const partDurations = stage.partDurations ?? [];
         const inputs: string[] = [];
         const chains: string[] = [];
         const labels: string[] = [];
         let idx = 0;
-        for (const part of parts) {
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i];
           const vIdx = idx++;
+          // Still-image intro/outro parts: loop the single frame for the
+          // configured hold duration (3s default), with a silent track of
+          // the same length. Videos are handled through probeMedia below.
+          const isImg = /\.(png|jpe?g|gif|webp|bmp)$/i.test(part);
+          if (isImg) {
+            const dur = Math.max(0.1, partDurations[i] ?? 3);
+            inputs.push("-loop", "1", "-t", dur.toFixed(3), "-i", part);
+            const aIdx = idx++;
+            inputs.push("-f", "lavfi", "-t", dur.toFixed(3), "-i", "anullsrc=r=48000:cl=stereo");
+            chains.push(`[${vIdx}:v]scale=${W}:${H},setsar=1,format=yuv420p,fps=${F},setpts=PTS-STARTPTS[v${vIdx}]`);
+            chains.push(`[${aIdx}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a${vIdx}]`);
+            labels.push(`[v${vIdx}][a${vIdx}]`);
+            continue;
+          }
           inputs.push("-i", part);
           const info = await probeMedia(ctx.ffmpegPath, part);
           if (info.hasAudio) {
@@ -457,13 +567,13 @@ ${tail}`;
           stage.verticalWidth, stage.verticalHeight, req.settings.fps,
         );
         // A vertical-derivative failure must not fail the main export.
-        const v = await execFfmpeg(ctx.ffmpegPath, args, ctx.onLog, stage.cwd);
+        const v = await execFfmpeg(ctx.ffmpegPath, args, ffmpegProgressRelay(req, stage.label, i - 1, total), stage.cwd);
         if (!v.ok) console.error(`[export] vertical pass failed:\n${v.tail}`);
         break;
       }
       default: {
         if (!stage.args) break;
-        const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, stage.args, ctx.onLog, stage.cwd);
+        const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, stage.args, ffmpegProgressRelay(req, stage.label, i - 1, total), stage.cwd);
         if (!ok) return `Export failed at: ${stage.label}\n${tail}`;
       }
     }

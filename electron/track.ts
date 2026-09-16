@@ -37,6 +37,8 @@ export interface OccScanRequest {
   /** Frame rate of the scan. */
   fps?: number;
   timeoutMs?: number;
+  /** Liveness feedback: called periodically with the frame count so far. */
+  onProgress?: (framesScanned: number) => void;
   /** Detection gates. Defaults favor recall but stay strict enough to avoid
    *  solid blocks of background matching a solid template. */
   dHashMin?: number;
@@ -90,47 +92,23 @@ export function scanPrivacyOccurrences(req: OccScanRequest): Promise<OccScanResu
     }
 
     let buf = Buffer.alloc(0);
+    const queue: Buffer[] = [];
     const samples: OccurrenceSample[][] = active.map(() => []);
     let framesScanned = 0;
     let stderrTail = "";
     let settled = false;
+    let closed = false;
+    let drainQueued = false;
+    let spawnError: string | null = null;
     const timer = setTimeout(() => {
       try { child.kill(); } catch { /* ignore */ }
     }, req.timeoutMs ?? 180_000);
 
-    const consume = (chunk: Buffer): void => {
-      buf = Buffer.concat([buf, chunk]);
-      while (buf.length >= frameBytes) {
-        const frame = { data: new Uint8Array(buf.subarray(0, frameBytes)), width: SCAN_W, height: SCAN_H };
-        buf = buf.subarray(frameBytes);
-        const tMs = framesScanned * frameMs;
-        if (tMs > req.durationMs + frameMs) continue;
-        for (let i = 0; i < active.length; i++) {
-          const a = active[i];
-          const hits = detectFrameOccurrences(frame, a.region, a.hash, a.pixels, {
-            dHashMin: req.dHashMin ?? 0.78,
-            nccMin: req.nccMin ?? 0.22,
-            coarseStride: req.coarseStride ?? 32,
-            refinePx: 2,
-            maxHits: req.maxHits ?? 8,
-          });
-          for (const h of hits) samples[i].push({ tMs, rect: h.rect, sim: h.sim });
-        }
-        framesScanned++;
-      }
-    };
-
-    child.stdout?.on("data", (d: Buffer) => consume(d));
-    child.stderr?.on("data", (d: Buffer) => {
-      stderrTail = (stderrTail + d.toString()).split("\n").slice(-4).join("\n");
-    });
-    child.on("error", (e) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve({ runs: req.masks.map(() => []), framesScanned, error: String(e) });
-    });
-    child.on("close", () => {
+    // The per-frame detection runs in the MAIN Electron process — with a scan
+    // this long, uninterrupted 'data' handling starves the window's message
+    // pump and Windows ghosts the app ("not responding"). Drain the frame
+    // stream in ~12ms slices, yielding to the event loop between slices.
+    const finish = (): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -138,8 +116,64 @@ export function scanPrivacyOccurrences(req: OccScanRequest): Promise<OccScanResu
       resolve({
         runs,
         framesScanned,
-        error: framesScanned === 0 ? `no frames decoded (${stderrTail.slice(-160)})` : undefined,
+        error: spawnError ?? (framesScanned === 0 ? `no frames decoded (${stderrTail.slice(-160)})` : undefined),
       });
+    };
+
+    const drain = (): void => {
+      drainQueued = false;
+      const sliceEnd = Date.now() + 12;
+      while (Date.now() < sliceEnd) {
+        while (buf.length < frameBytes && queue.length > 0) {
+          const chunk = queue.shift()!;
+          buf = buf.length === 0 ? chunk : Buffer.concat([buf, chunk]);
+        }
+        if (buf.length < frameBytes) break;
+        const frame = { data: new Uint8Array(buf.subarray(0, frameBytes)), width: SCAN_W, height: SCAN_H };
+        buf = buf.subarray(frameBytes);
+        const tMs = framesScanned * frameMs;
+        if (tMs <= req.durationMs + frameMs) {
+          for (let i = 0; i < active.length; i++) {
+            const a = active[i];
+            const hits = detectFrameOccurrences(frame, a.region, a.hash, a.pixels, {
+              dHashMin: req.dHashMin ?? 0.78,
+              nccMin: req.nccMin ?? 0.22,
+              coarseStride: req.coarseStride ?? 32,
+              refinePx: 2,
+              maxHits: req.maxHits ?? 8,
+            });
+            for (const h of hits) samples[i].push({ tMs, rect: h.rect, sim: h.sim });
+          }
+          framesScanned++;
+          if (req.onProgress && framesScanned % 50 === 0) req.onProgress(framesScanned);
+        }
+      }
+      if (buf.length >= frameBytes || queue.length > 0) {
+        drainQueued = true;
+        setImmediate(drain);
+      } else if (closed) {
+        finish();
+      }
+    };
+
+    child.stdout?.on("data", (d: Buffer) => {
+      queue.push(d);
+      if (!drainQueued) {
+        drainQueued = true;
+        setImmediate(drain);
+      }
+    });
+    child.stderr?.on("data", (d: Buffer) => {
+      stderrTail = (stderrTail + d.toString()).split("\n").slice(-4).join("\n");
+    });
+    child.on("error", (e) => {
+      spawnError = String(e);
+      closed = true;
+      if (!drainQueued) finish();
+    });
+    child.on("close", () => {
+      closed = true;
+      if (!drainQueued) finish();
     });
   });
 }

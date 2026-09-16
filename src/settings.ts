@@ -17,6 +17,7 @@ export interface ShortcutsConfig {
 export const DEFAULT_SHORTCUTS: ShortcutsConfig = {
   toggle_recording: { key: "F9", modifiers: [] },
   toggle_studio: { key: "F1", modifiers: [] },
+  toggle_prompter: { key: "F2", modifiers: [] },
   toggle_ff: { key: "F4", modifiers: [] },
   toggle_privacy: { key: "F6", modifiers: [] },
   toggle_privacy_cut: { key: "F6", modifiers: ["SHIFT"] },

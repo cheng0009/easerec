@@ -124,6 +124,10 @@ export async function toggleRecording(): Promise<string | null> {
     const s = useStore.getState();
     s.setRecording({ isRecording: true, elapsedMs: 0, pausedMs: 0 });
     resetMarksForNewRecording(null);
+    // Drop the previous take from review so the stage returns to the LIVE
+    // preview (WYSIWYG) — a stale reviewPath would keep replaying the old
+    // video under the LIVE badge.
+    s.setUi({ reviewPath: null });
     try {
       const dir = getDirector();
       // User recording settings take effect at session start.
@@ -146,6 +150,13 @@ export async function toggleRecording(): Promise<string | null> {
       await dir.beginRecording();
       if (s.recording.regionMode && s.recording.regionRect) {
         await dir.recorder.setSessionRegion(s.recording.regionRect);
+      }
+      // Recording-under-way: surface the floating teleprompter automatically so
+      // a presenter with a prepared script is never left hunting for F2 on
+      // stage. Only opens when the script has real content.
+      const tp = useStore.getState().settings.teleprompter;
+      if (tp.text.trim() && !tp.visible) {
+        useStore.getState().setSettings({ teleprompter: { ...tp, visible: true } });
       }
     } catch (e) {
       console.error("[record] begin failed:", e);

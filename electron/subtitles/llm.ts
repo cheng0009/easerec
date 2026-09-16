@@ -185,3 +185,44 @@ export function applyCorrections<T extends { startMs: number; endMs: number; tex
     return c ? { ...seg, text: c.text } : seg;
   });
 }
+
+export interface LlmTestResult {
+  ok: boolean;
+  /** Human-readable detail for the settings UI. */
+  detail: string;
+  latencyMs?: number;
+}
+
+/**
+ * Connection probe for the settings UI: issues the smallest possible
+ * /chat/completions call and reports latency + which model answered.
+ * Never throws — failures come back as `{ ok: false, detail }`.
+ */
+export async function testLlmConnection(
+  config: LlmConfig,
+  fetchFn: typeof fetch = fetch,
+  timeoutMs = 15000,
+): Promise<LlmTestResult> {
+  if (!config.apiKey) {
+    return { ok: false, detail: "API Key 为空" };
+  }
+  const started = Date.now();
+  try {
+    await callChat(config, "Reply with exactly: OK", "ping", fetchFn, timeoutMs);
+    return {
+      ok: true,
+      detail: `✓ 连接成功 (${Date.now() - started}ms) — ${config.model || "model"}`,
+      latencyMs: Date.now() - started,
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    const detail = /abort|timeout/i.test(msg)
+      ? `⏱ 超时（${timeoutMs / 1000}s）— 检查接口地址或网络`
+      : /401|403|unauthorized|api key|invalid/i.test(msg)
+        ? `✗ 鉴权失败（${msg}）— 检查 API Key`
+        : /404|405/i.test(msg)
+          ? `✗ 接口不存在（${msg}）— 检查接口地址是否包含 /v1`
+          : `✗ 连接失败（${msg}）`;
+    return { ok: false, detail, latencyMs: Date.now() - started };
+  }
+}

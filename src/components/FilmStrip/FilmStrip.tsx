@@ -26,8 +26,11 @@ export function FilmStrip() {
   const ui = useStore((s) => s.ui);
   const setUi = useStore((s) => s.setUi);
 
+  // elapsedMs ticks live while rolling and is KEPT after stop (all stop paths
+  // preserve it; the next start zeroes it) — without this term a take that
+  // carries no marks would collapse straight back to "等待开拍" on stop.
   const mainDurationMs = Math.max(
-    recording.isRecording ? recording.elapsedMs : 0,
+    recording.elapsedMs,
     marks.edits.reduce((a, e) => Math.max(a, e.endMs), 0),
   );
   const outputMainMs = mainDurationMs > 0 && marks.edits.length > 0
@@ -40,6 +43,10 @@ export function FilmStrip() {
     outputMainMs,
   );
   const review = !recording.isRecording && !!ui.reviewPath;
+  // The "a take just landed" state must NOT depend on reviewPath (the save
+  // path can fail independently of the capture) — a finished take with
+  // length is enough to celebrate it.
+  const hasTake = !recording.isRecording && mainDurationMs > 0;
 
   const onStripClick = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!review) return;
@@ -50,10 +57,15 @@ export function FilmStrip() {
   };
 
   const attachEnd = async (which: "intro" | "outro") => {
-    const picked = await open({ multiple: false, filters: [{ name: "视频", extensions: ["mp4", "webm", "mov", "mkv"] }] });
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "媒体文件", extensions: ["mp4", "webm", "mov", "mkv", "png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
+    });
     if (typeof picked !== "string") return;
-    const durS = await tauriInvoke<number>("probe_media_duration", { path: picked }).catch(() => 0);
-    const durationS = durS > 0 ? Math.round(durS * 10) / 10 : 3;
+    const isImage = /\.(png|jpe?g|gif|webp|bmp)$/i.test(picked);
+    const durationS = isImage
+      ? 3
+      : (await tauriInvoke<number>("probe_media_duration", { path: picked }).catch(() => 0)) || 3;
     setSettings(which === "intro"
       ? { introPath: picked, introDurationS: durationS }
       : { outroPath: picked, outroDurationS: durationS });
@@ -87,7 +99,7 @@ export function FilmStrip() {
         <EndSlot
           kind="intro"
           label={L("片头", "Intro")}
-          attachTitle={L("附加片头视频", "Attach an intro clip")}
+          attachTitle={L("附加片头媒体（图片或视频）", "Attach an intro (image or video)")}
           attachHint={L("点击附加", "click to attach")}
           path={settings.introPath}
           durationS={settings.introDurationS}
@@ -95,11 +107,14 @@ export function FilmStrip() {
           onAttach={() => void attachEnd("intro")}
           onDetach={() => detachEnd("intro")}
         />
-        {/* 主片 */}
-        <div style={{ ...styles.main, width: `${layout.segs[1].width}%` }}>
+        {/* 主片 — recording: live counter; review: the take, highlighted so
+            "a new material clip just landed" is visible at a glance. */}
+        <div style={{ ...styles.main, width: `${layout.segs[1].width}%`, ...(hasTake ? styles.mainReady : {}) }}>
           <div style={styles.perfTop} />
           {mainDurationMs <= 0 ? (
             <span style={styles.mainEmpty}>- - - {L("等待开拍", "waiting to roll")} - - -</span>
+          ) : hasTake ? (
+            <span style={styles.mainReadyLabel}>✅ {L("素材", "Take")} {formatClock(mainDurationMs)}</span>
           ) : (
             <span style={styles.mainLabel}>● {L("主片", "Main")} {formatClock(mainDurationMs)}</span>
           )}
@@ -126,7 +141,7 @@ export function FilmStrip() {
         <EndSlot
           kind="outro"
           label={L("片尾", "Outro")}
-          attachTitle={L("附加片尾视频", "Attach an outro clip")}
+          attachTitle={L("附加片尾媒体（图片或视频）", "Attach an outro (image or video)")}
           attachHint={L("点击附加", "click to attach")}
           path={settings.outroPath}
           durationS={settings.outroDurationS}
@@ -186,12 +201,14 @@ function EndSlot(props: {
   onDetach: () => void;
 }) {
   const attached = !!props.path;
+  const isImage = /\.(png|jpe?g|gif|webp|bmp)$/i.test(props.path);
+  const mediaIcon = attached ? (isImage ? "🖼" : "🎬") : "";
   return (
     <div style={{ ...styles.end, width: `${props.width}%`, ...(attached ? styles.endOn : {}) }} title={props.path}>
       <div style={styles.perfTop} />
       {attached ? (
         <>
-          <span style={styles.endOnText}>{props.label} ✓ {props.durationS}s</span>
+          <span style={styles.endOnText}>{mediaIcon} {props.label} {props.durationS}s</span>
           <button
             style={styles.endDetach}
             onClick={(e) => { e.stopPropagation(); props.onDetach(); }}
@@ -250,6 +267,8 @@ const styles: Record<string, React.CSSProperties> = {
   },
   mainEmpty: { fontSize: 11, color: "var(--text-muted)", letterSpacing: 2 },
   mainLabel: { fontSize: 11, color: "var(--text-secondary)", fontFamily: "var(--font-mono)" },
+  mainReady: { borderColor: "var(--accent)", boxShadow: "0 0 10px var(--accent-glow)" },
+  mainReadyLabel: { fontSize: 11, fontWeight: 700, color: "var(--accent)", fontFamily: "var(--font-mono)" },
   perfTop: {
     position: "absolute", top: 2, left: 4, right: 4, height: 3,
     background: "repeating-linear-gradient(90deg, var(--border-default) 0 3px, transparent 3px 8px)",

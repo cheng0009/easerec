@@ -1,5 +1,5 @@
 //! Post-processing pipeline - export to publishable video
-//! Handles silence trimming, subtitle burning, intro/outro concatenation.
+//! Handles subtitle burning, intro/outro concatenation.
 //! Requires FFmpeg for advanced features; graceful fallback otherwise.
 
 use crate::error::AppResult;
@@ -7,10 +7,6 @@ use crate::error::AppResult;
 /// Full post-processing configuration
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PostConfig {
-    // Silence trimming
-    pub trim_silence: bool,
-    pub silence_threshold_s: f64,
-
     // Subtitles
     pub burn_subtitles: bool,
     pub subtitle_font_size: f32,
@@ -35,8 +31,6 @@ pub struct PostConfig {
 impl Default for PostConfig {
     fn default() -> Self {
         Self {
-            trim_silence: false,
-            silence_threshold_s: 1.5,
             burn_subtitles: false,
             subtitle_font_size: 28.0,
             subtitle_font_family: "Arial".into(),
@@ -61,7 +55,6 @@ pub struct PostResult {
     pub output_path: String,
     pub original_duration_s: f64,
     pub trimmed_duration_s: f64,
-    pub silence_removed_s: f64,
 }
 
 pub struct PostProcessor {
@@ -96,7 +89,6 @@ impl PostProcessor {
                 output_path: output_path.to_string(),
                 original_duration_s: 0.0,
                 trimmed_duration_s: 0.0,
-                silence_removed_s: 0.0,
             });
         }
 
@@ -104,27 +96,8 @@ impl PostProcessor {
         let temp1 = format!("{}_tmp1.mp4", output_path.trim_end_matches(".mp4"));
         let temp2 = format!("{}_tmp2.mp4", output_path.trim_end_matches(".mp4"));
 
-        // Step 1: Trim silence if enabled
-        let mut current_input = video_path.to_string();
-        if self.config.trim_silence {
-            // Simple silence trim: detect and cut
-            let trim_output = format!("{}_trimmed.mp4", output_path.trim_end_matches(".mp4"));
-            let status = std::process::Command::new(&ffmpeg)
-                .args(&["-y", "-i", video_path])
-                .args(&["-af", &format!("silenceremove=stop_periods=-1:stop_duration={}:stop_threshold=-35dB",
-                    self.config.silence_threshold_s)])
-                .args(&["-c:v", "copy"])
-                .args(&["-c:a", "aac", "-b:a", "192k"])
-                .arg(&trim_output)
-                .status();
-
-            if status.map(|s| s.success()).unwrap_or(false) {
-                current_input = trim_output;
-                log::info!("Silence trimmed");
-            }
-        }
-
-        // Step 2: Build concat inputs (intro + main + outro)
+        // Step 1: Build concat inputs (intro + main + outro)
+        let current_input = video_path.to_string();
         let mut inputs: Vec<String> = vec![];
         let mut filters: Vec<String> = vec![];
         let mut input_idx = 0u32;
@@ -199,7 +172,6 @@ impl PostProcessor {
             output_path: output_path.to_string(),
             original_duration_s: 0.0,
             trimmed_duration_s: 0.0,
-            silence_removed_s: 0.0,
         })
     }
 

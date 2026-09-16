@@ -20,6 +20,7 @@ import {
   buildCorrectionSystemPrompt,
   buildCorrectionUserPrompt,
   correctTranscript,
+  testLlmConnection,
   validateCorrectionResponse,
   type IndexedSegment,
 } from "./llm";
@@ -65,7 +66,9 @@ describe("ASS generation", () => {
       style,
       { width: 1920, height: 1080 },
     );
-    expect(ass).toContain("PlayResX: 1920");
+    // PlayRes uses a 192-unit reference height (matches preview coordinate system).
+    expect(ass).toContain("PlayResX: 341"); // 1920 * 192 / 1080 ≈ 341
+    expect(ass).toContain("PlayResY: 192");
     expect(ass).toContain("Style: DCSub, Microsoft YaHei, 28, &H00FFFFFF");
     expect(ass).toContain("Dialogue: 0,0:00:01.00,0:00:02.50,DCSub,,0,0,0,,大家好");
     expect(ass).not.toContain("0:00:03.00"); // empty cue dropped
@@ -252,5 +255,47 @@ describe("LLM correction", () => {
     const out = applyCorrections(timed, [{ id: 1, text: "B" }]);
     expect(out[1].text).toBe("B");
     expect(out[0].text).toBe("a");
+  });
+
+  it("testLlmConnection reports success with latency", async () => {
+    const fetchOk = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: "OK" } }] }),
+    });
+    const res = await testLlmConnection(
+      { baseUrl: "https://x/v1", apiKey: "k", model: "m", enabled: true },
+      fetchOk as unknown as typeof fetch,
+    );
+    expect(res.ok).toBe(true);
+    expect(res.latencyMs).toBeGreaterThanOrEqual(0);
+    const url = (fetchOk.mock.calls[0][0] as string);
+    expect(url).toContain("/chat/completions");
+  });
+
+  it("testLlmConnection behaves on missing key / auth / timeout", async () => {
+    const noKey = await testLlmConnection({ baseUrl: "https://x/v1", apiKey: "", model: "m", enabled: true });
+    expect(noKey.ok).toBe(false);
+    expect(noKey.detail).toContain("API Key");
+
+    const fetch401 = vi.fn().mockResolvedValue({ ok: false, status: 401, statusText: "Unauthorized" });
+    const auth = await testLlmConnection(
+      { baseUrl: "https://x/v1", apiKey: "bad", model: "m", enabled: true },
+      fetch401 as unknown as typeof fetch,
+    );
+    expect(auth.ok).toBe(false);
+    expect(auth.detail).toContain("鉴权");
+
+    const fetchSlow = vi.fn().mockImplementation(async (_url: string, init: RequestInit) => {
+      await new Promise((r) => setTimeout(r, 500));
+      const signal = (init.signal as AbortSignal | undefined);
+      if (signal?.aborted) throw new Error("aborted");
+      throw new Error("timed out");
+    });
+    const slow = await testLlmConnection(
+      { baseUrl: "https://x/v1", apiKey: "k", model: "m", enabled: true },
+      fetchSlow as unknown as typeof fetch,
+      100,
+    );
+    expect(slow.ok).toBe(false);
   });
 });

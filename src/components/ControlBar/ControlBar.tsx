@@ -97,7 +97,7 @@ export function ControlBar() {
           <button style={{ ...styles.markBtn, ...(marks.activeFF ? styles.onBlue : {}) }} onClick={() => void toggleFF()} title={L("快进模式 (F4) — 导出时压缩为 3-5 秒", "Fast-forward (F4) — compressed to 3-5s at export")}>
             {marks.activeFF ? L("⏩ 快进中", "⏩ FF on") : L("⏩ 快进", "⏩ Fast-fwd")}
           </button>
-          <button style={{ ...styles.markBtn, ...(marks.activePrivacy || marks.privacyDrawing ? styles.onYellow : {}) }} onClick={() => void togglePrivacy()} title={L("隐私遮挡 (F6) — 框选区域并自动回溯", "Privacy mask (F6) — box the region, auto backtrace")}>
+          <button style={{ ...styles.markBtn, ...(marks.activePrivacy || marks.privacyDrawing ? styles.onYellow : {}) }} onClick={() => void togglePrivacy()} title={L("隐私遮挡 (F6) — 框选区域，自动回溯，画框前的泄露段自动剪除", "Privacy mask (F6) — box the region; auto backtrace + the exposed pre-box window is cut")}>
             {marks.activePrivacy ? L("🛡 结束遮挡", "🛡 End mask") : marks.privacyDrawing ? L("🛡 拖拽框选…", "🛡 Draw box…") : L("🛡 遮挡", "🛡 Mask")}
           </button>
           <button style={{ ...styles.markBtn, ...(marks.activePrivacyCut ? styles.onRed : {}) }} onClick={() => void togglePrivacyCut()} title={L("整段隐私剪除 (Shift+F6) — 登录/输密码等私密操作", "Privacy span (Shift+F6) — logins, passwords, private ops")}>

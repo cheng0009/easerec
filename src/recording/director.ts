@@ -43,6 +43,10 @@ async function persistBlob(blob: Blob): Promise<string | null> {
 function ensureRecorder(handlers: RecorderHandlers = {}): Recorder {
   if (!rec) {
     rec = new Recorder({}, handlers);
+  } else if (Object.keys(handlers).length > 0) {
+    // The singleton often predates callers that pass callbacks (e.g. the
+    // elapsed/perf feeds from useRecorderState) — merge instead of dropping.
+    rec.setHandlers(handlers);
   }
   return rec;
 }

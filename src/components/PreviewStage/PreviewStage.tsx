@@ -19,13 +19,25 @@ export function PreviewStage() {
   const reviewPath = useStore((s) => s.ui.reviewPath);
   const seekRequest = useStore((s) => s.ui.seekRequest);
   const setUi = useStore((s) => s.setUi);
+  const exportOpen = useStore((s) => s.ui.exportOpen);
   const recording = useStore((s) => s.recording);
   const activePause = useStore((s) => s.marks.activePause);
+  // The stage stays mounted while the library tab is in front (both views are
+  // kept alive) — visibility only decides whether to paint/pause.
+  const studioVisible = useStore((s) => s.ui.view) === "studio";
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const [hasFrame, setHasFrame] = useState(false);
+  // Review length comes from the file itself (a take opened from the library
+  // has no elapsed-time state to fall back on). Infinity happens on streamed
+  // webm — fall back to the session timer then.
+  const [reviewDurMs, setReviewDurMs] = useState(0);
+  // Next-step guide: dismissed per take — takeId (bumped at every start)
+  // identities the take WITHOUT depending on the saved file path.
+  const takeId = useStore((s) => s.marks.takeId);
+  const [ctaDismissed, setCtaDismissed] = useState<number | null>(null);
   const [bannerVisible, setBannerVisible] = useState(() => {
     // Session-only dismissal: reappears after a restart, stays hidden after
     // the user closes it or starts recording — the top-right button reopens.
@@ -60,7 +72,7 @@ export function PreviewStage() {
   // export — so the preview draws the FOCUS BOX the export will produce,
   // keeping the WYSIWYG promise ("预览框 = 导出时的放大区域").
   useEffect(() => {
-    if (reviewPath) return;
+    if (reviewPath || !studioVisible) return;
     let raf: number | null = null;
     const draw = () => {
       const dir = getDirector();
@@ -110,7 +122,21 @@ export function PreviewStage() {
     };
     raf = requestAnimationFrame(draw);
     return () => { if (raf) cancelAnimationFrame(raf); };
-  }, [reviewPath, hasFrame, L]);
+  }, [reviewPath, studioVisible, hasFrame, L]);
+
+  // Hidden behind the library tab: pause review playback but keep the
+  // position, so coming back resumes exactly where the user left off.
+  useEffect(() => {
+    if (!studioVisible) videoRef.current?.pause();
+  }, [studioVisible]);
+
+  // A fresh take invalidates the previous file duration.
+  useEffect(() => { setReviewDurMs(0); }, [reviewPath]);
+  // Opening the export drawer IS the guided next step — retire the guide for
+  // this take instead of popping back up when the drawer closes.
+  useEffect(() => {
+    if (exportOpen) setCtaDismissed(takeId);
+  }, [exportOpen, takeId]);
 
   // Seek requests from the film strip.
   useEffect(() => {
@@ -123,6 +149,8 @@ export function PreviewStage() {
 
   const elapsed = recording.elapsedMs - recording.pausedMs -
     (recording.isPaused && activePause ? Math.max(0, Date.now() - activePause.startMs) : 0);
+  // Take length: file metadata when known, session timer otherwise.
+  const reviewLenMs = reviewDurMs || Math.max(0, recording.elapsedMs - recording.pausedMs);
   const fmt = (ms: number) => {
     const s = Math.max(0, Math.floor(ms / 1000));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
@@ -144,7 +172,29 @@ export function PreviewStage() {
       )}
       {!isRecording && reviewPath && (
         <div style={{ ...styles.badge, top: 10, left: 10, background: "var(--accent-success)" }}>
-          ✅ {L("成片", "Film")} {fmt(recording.elapsedMs - recording.pausedMs)}
+          ✅ {L("回放", "Review")} {fmt(reviewLenMs)}
+        </div>
+      )}
+
+      {/* Next-step guide: the take just landed and the one action that matters
+          now is exporting. Keyed on takeId (not the file path) so it shows
+          even if the save path came back empty. Dismissed per take, or
+          retired once the export drawer has been opened. */}
+      {!isRecording && reviewLenMs > 0 && !exportOpen && ctaDismissed !== takeId && (
+        <div style={styles.ctaWrap}>
+          <div style={styles.ctaBar}>
+            <span style={styles.ctaText}>
+              🎬 {L("素材已就绪", "Take saved")} · {fmt(reviewLenMs)} · {L("下一步：导出成片", "Next: export the film")}
+            </span>
+            <button style={styles.ctaBtn} onClick={() => setUi({ exportOpen: true })}>
+              📦 {L("导出成片", "Export film")} →
+            </button>
+            <button
+              style={styles.ctaClose}
+              onClick={() => setCtaDismissed(takeId)}
+              title={L("关闭提示", "Dismiss")}
+            >✕</button>
+          </div>
         </div>
       )}
 
@@ -161,6 +211,10 @@ export function PreviewStage() {
           ref={videoRef}
           src={dcMediaUrl(reviewPath)}
           controls
+          onLoadedMetadata={(e) => {
+            const d = e.currentTarget.duration;
+            if (Number.isFinite(d) && d > 0) setReviewDurMs(Math.round(d * 1000));
+          }}
           style={styles.video}
         />
       ) : !bannerVisible && (hasFrame || isRecording) ? (
@@ -302,6 +356,30 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: "hidden", minHeight: 160,
   },
   video: { width: "100%", height: "100%", objectFit: "contain" },
+  ctaWrap: {
+    position: "absolute", top: 10, left: 0, right: 0, zIndex: 6,
+    display: "flex", justifyContent: "center", pointerEvents: "none",
+  } as React.CSSProperties,
+  ctaBar: {
+    display: "flex", alignItems: "center", gap: 12, pointerEvents: "auto",
+    padding: "9px 12px 9px 16px", borderRadius: "var(--radius-lg)",
+    // SOLID card — it floats over a MOVING video; translucency + blur made
+    // the text compete with the footage underneath.
+    background: "var(--bg-secondary)",
+    border: "1px solid var(--accent)",
+    boxShadow: "0 10px 32px rgba(0,0,0,0.55), 0 0 16px var(--accent-glow)",
+    animation: "slideIn 0.25s ease-out", whiteSpace: "nowrap",
+  } as React.CSSProperties,
+  ctaText: { fontSize: 13, fontWeight: 700, color: "var(--text-primary)" },
+  ctaBtn: {
+    fontSize: 12, fontWeight: 700, padding: "6px 14px", borderRadius: "var(--radius-sm)",
+    background: "var(--accent)", color: "#fff", border: "none", cursor: "pointer",
+    boxShadow: "0 0 12px var(--accent-glow)", animation: "exportBreath 2s infinite",
+  },
+  ctaClose: {
+    background: "none", border: "none", color: "var(--text-muted)",
+    fontSize: 11, cursor: "pointer", padding: "0 2px",
+  },
   badge: {
     position: "absolute", zIndex: 5, fontSize: 11, fontWeight: 700, color: "#fff",
     padding: "3px 10px", borderRadius: 10, background: "var(--badge-bg)",

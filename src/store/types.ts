@@ -76,6 +76,19 @@ export interface LlmConfigState {
   model: string;
 }
 
+/** Floating teleprompter config. `visible` is transient session state — the
+ *  prompter must never pop open by itself at launch. */
+export interface TeleprompterState {
+  /** Full script text (paragraphs separated by blank lines). */
+  text: string;
+  /** Prompt font size in px (10..200). */
+  fontSize: number;
+  /** Auto-scroll speed in px/s (0 = manual only). */
+  speed: number;
+  /** Whether the floating window is currently shown. */
+  visible: boolean;
+}
+
 export interface SettingsState {
   fps: number;
   resolution: { width: number; height: number };
@@ -86,7 +99,6 @@ export interface SettingsState {
   zoomLevel: number;
   outputDir: string;
   modelPath: string;
-  silenceThresholdS: number;
   subtitleEnabled: boolean;
   /** Subtitle look (ASS style fields), user-configurable. */
   subtitleStyle: SubtitleStyleState;
@@ -113,6 +125,8 @@ export interface SettingsState {
   outroDurationS: number;
   /** Play the bundled chime when an export finishes successfully. */
   successSound: boolean;
+  /** Floating teleprompter script + look (see TeleprompterState). */
+  teleprompter: TeleprompterState;
 }
 
 /** Hub UI state. theme persists; the rest is transient. */
@@ -151,4 +165,7 @@ export interface MarksState {
   feedback: string | null;
   /** Unfinalized recordings found at startup (crash recovery). */
   recoverable: { webmPath: string; sizeBytes: number }[];
+  /** Bumped at every recording start — identity for "the latest take", so UI
+   *  guidance (next-step CTA) can re-arm per take without a file path. */
+  takeId: number;
 }

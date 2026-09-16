@@ -71,7 +71,7 @@ UI 代码保留了 Tauri 风格的 API 调用，由 Vite alias 在构建期路�
 
 当前能力：
 - WebM → MP4（libopenh264 软编码 H.264 + AAC，`+faststart`）
-- 可选静音裁剪（`silenceremove` 滤镜，阈值来自设置）
+- EBU R128 响度归一（`loudnorm` 滤镜）
 
 **尚未接入导出的**（UI 已有占位）: 字幕烧录、片头片尾拼接（IntroOutroPanel 目前仅存 localStorage）、快进/倒带/隐私标记剪辑 —— 见 `ROADMAP.md` 的剪辑决策列表。
 

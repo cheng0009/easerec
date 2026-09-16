@@ -69,3 +69,7 @@ recordly_ref/
 /tauri
 /out
 /directorcam@0.1.0
+
+# ---- Scratch / temp dev files ----
+/run*.sh
+/*.psd

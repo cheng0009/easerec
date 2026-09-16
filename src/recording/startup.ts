@@ -11,6 +11,7 @@ import { useStore } from "../store";
 import { defaultShortcutsConfig, type ShortcutItem as ShortcutItemType } from "../settings";
 import { toggleRecording } from "./startRecording";
 import { installMarksBridge } from "./marks";
+import { toggleTeleprompter, installTeleprompterSync, subscribeTeleprompterPush } from "./teleprompter";
 
 let installed = false;
 
@@ -33,11 +34,20 @@ async function handleHotkey(cmd: string): Promise<void> {
   const st = useStore.getState();
   switch (cmd) {
     case "toggle-recording":
-      try { await toggleRecording(); }
+      try {
+        const saved = await toggleRecording();
+        // Hotkey stop lands in review mode, same as the ControlBar button —
+        // otherwise the stage falls back to the empty/preview look.
+        if (saved) useStore.getState().setUi({ reviewPath: saved });
+      }
       catch (e) { console.error("[hotkey] toggle-recording failed:", e); }
       break;
     case "toggle-studio":
       try { await import("../lib/tauri").then((m) => m.tauriInvoke("toggle_studio_mode")); } catch (e) { console.error("[hotkey] toggle-studio failed:", e); }
+      break;
+    case "toggle-prompter":
+      // F2: show/hide the floating teleprompter window.
+      try { toggleTeleprompter(); } catch (e) { console.error("[hotkey] toggle-prompter failed:", e); }
       break;
     case "cycle-audio": {
       const order: Array<"system" | "mic" | "both"> = ["system", "mic", "both"];
@@ -137,16 +147,11 @@ async function handleHotkey(cmd: string): Promise<void> {
 function handleToolDigit(n: number): void {
   const st = useStore.getState();
   const eff = st.effects;
-  if (eff.activeMagnifier) {
+  // Any annotation effect active → digits only switch magnifier lens
+  // level, preventing accidental smart-zoom ("screen operation") or
+  // other tool adjustments while presenting.
+  if (eff.activeMagnifier || eff.stepModeActive || eff.activeHighlighter || eff.rippleEnabled) {
     st.setEffects({ lensLevel: n });
-    return;
-  }
-  if (eff.stepModeActive) {
-    st.setEffects({ stepMarkerColor: n === 1 ? "red" : n === 2 ? "yellow" : "blue" });
-    return;
-  }
-  if (eff.activeHighlighter) {
-    st.setEffects({ penLevel: n });
     return;
   }
   const levels = [1.0, 1.5, 2.0];
@@ -198,6 +203,7 @@ function buildFallbackCombos(cfg: Record<string, ShortcutItemType | undefined>):
   };
   push("toggle-recording", cfg.toggle_recording);
   push("toggle-studio", cfg.toggle_studio);
+  push("toggle-prompter", cfg.toggle_prompter);
   push("toggle-ff", cfg.toggle_ff);
   push("toggle-privacy", cfg.toggle_privacy);
   push("toggle-privacy-cut", cfg.toggle_privacy_cut);
@@ -259,6 +265,11 @@ export function installDirectorController(): void {
   });
 
   installMarksBridge();
+
+  // Floating teleprompter: push store changes to the main process and merge
+  // in-window edits (font/speed/close) back into the store.
+  installTeleprompterSync();
+  subscribeTeleprompterPush();
 
   void director.startScreen();
 

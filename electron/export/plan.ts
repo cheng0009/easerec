@@ -48,8 +48,8 @@ export interface ExportSettings {
   /** Brand texts (follows the UI language). */
   brandTitle: string;
   brandSlogan: string;
-  trimSilence: boolean;
-  silenceThresholdS: number;
+  /** Optional English slogan rendered under the main slogan. */
+  brandSloganEn?: string;
   loudnorm: boolean;
   subtitles: boolean;
   subtitleStyle: SubtitleStyle;
@@ -88,6 +88,9 @@ export interface StageBase {
   /** concat stages: the list file to write + its inputs, in order. */
   listFile?: string;
   inputs?: string[];
+  /** final-concat: parallel to `inputs`; still-image parts need an explicit
+   *  hold duration (seconds) since they have no video duration to inherit. */
+  partDurations?: number[];
   /** vertical stage plumbing, filled at plan time, executed by the runner. */
   sendcmdFile?: string;
   camTrackPath?: string;
@@ -122,13 +125,45 @@ export function bitrateFor(w: number, h: number): number {
   return Math.round(Math.max(6, Math.min(40, mp * 5.8)));
 }
 
+// --- Encoder selection -------------------------------------------------------
+// libopenh264 (the always-available fallback) is software-only, largely ignores
+// -preset, and crawls at 4K — a 7-minute 2160p timeline is FULLY re-encoded
+// several times per export (crop/zoom/burn/concat/vertical), so software means
+// tens of minutes and a starved UI. Windows machines almost always ship a
+// hardware H.264 encoder (NVIDIA/Intel/AMD/MediaFoundation); the pipeline
+// probes them once per process (a real 3-frame encode — "-encoders" merely
+// lists what compiled in) and every re-encode then runs near realtime.
+export interface EncoderChoice {
+  name: string;
+  /** Codec-specific args; must carry the rate control for bitrate `b` (Mbps). */
+  args: (b: number) => string[];
+}
+
+let preferredVideoEnc: EncoderChoice | null = null;
+
+export function setPreferredVideoEnc(choice: EncoderChoice | null): void {
+  preferredVideoEnc = choice;
+}
+
+export const ENCODER_CANDIDATES: EncoderChoice[] = [
+  { name: "h264_nvenc", args: (b) => ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-b:v", `${b}M`, "-maxrate", `${b}M`, "-bufsize", `${b * 2}M`] },
+  { name: "h264_qsv", args: (b) => ["-c:v", "h264_qsv", "-preset", "veryfast", "-b:v", `${b}M`, "-maxrate", `${b}M`, "-bufsize", `${b * 2}M`] },
+  { name: "h264_amf", args: (b) => ["-c:v", "h264_amf", "-quality", "speed", "-b:v", `${b}M`] },
+  { name: "h264_mf", args: (b) => ["-c:v", "h264_mf", "-b:v", `${b}M`] },
+];
+
 /** Encode args bound to an output frame size (bitrate derived from it). */
 export function encArgs(w: number, h: number): string[] {
   const b = bitrateFor(w, h);
+  const rate = ["-b:v", `${b}M`, "-maxrate", `${b}M`, "-bufsize", `${b * 2}M`];
+  const v = preferredVideoEnc
+    ? [...preferredVideoEnc.args(b), "-pix_fmt", "yuv420p"]
+    // Software fallback keeps the historical arg order (plan tests pin it).
+    : ["-c:v", "libopenh264", "-pix_fmt", "yuv420p", "-preset", "veryfast", ...rate];
   return [
-    "-c:v", "libopenh264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
-    "-b:v", `${b}M`, "-maxrate", `${b}M`, "-bufsize", `${b * 2}M`,
-    "-c:a", "aac", "-ar", "48000", "-ac", "2", "-video_track_timescale", "90000",
+    ...v,
+    "-c:a", "aac", "-ar", "48000", "-ac", "2",
+    "-video_track_timescale", "90000",
   ];
 }
 
@@ -213,10 +248,18 @@ export const BURN_PASS_BUDGET_CHARS = 24000;
  * Returns "" when no rect is usable; the caller must then skip the stage.
  */
 export function maskBurnGraph(rects: MaskBurnRect[], inW: number, inH: number): string {
-  const chains: string[] = [];
   const usable = coalesceBurnRects(rects.filter(validBurnRect));
-  let last = "[0:v]";
-  usable.forEach((m, i) => {
+
+  // Group same-size rects. Each group becomes ONE crop→pixelize→overlay pass
+  // whose x/y/enable are per-frame expressions — windows are disjoint, so a
+  // linear sum of between() terms is non-zero for exactly one rect at a time.
+  // The old per-rect split→crop→scale→scale→overlay CHAIN collapsed on real
+  // timelines: 29 rects meant 29 chained full-frame composites per frame and
+  // the scheduler degraded to ~0 fps (a 7-min export froze 15+ min at 0%).
+  // pixelize edits only its rectangle in-place — no full-frame copies.
+  interface BurnGroup { w: number; h: number; terms: { x: number; y: number; t0: number; t1: number }[] }
+  const groups = new Map<string, BurnGroup>();
+  for (const m of usable) {
     let X = Math.round(m.x * inW);
     let Y = Math.round(m.y * inH);
     if (X & 1) X -= 1;
@@ -227,20 +270,39 @@ export function maskBurnGraph(rects: MaskBurnRect[], inW: number, inH: number): 
     let H = Math.min(inH - Y, Math.max(2, Math.round(m.h * inH)));
     if (W & 1) W -= 1;
     if (H & 1) H -= 1;
-    if (W < 4 || H < 4) return;
-    // yuv420p-safe tiny-stage sizes (mosaic cell resolution).
-    const sw = Math.max(2, Math.round(W / 12)) & ~1;
-    const sh = Math.max(2, Math.round(H / 12)) & ~1;
-    const outLabel = i === usable.length - 1 ? "[vout]" : `[o${i}]`;
-    chains.push(`${last}split=2[s${i}][t${i}]`);
-    chains.push(
-      `[t${i}]crop=w=${W}:h=${H}:x=${X}:y=${Y},` +
-      `scale=${sw}:${sh}:flags=area,` +
-      `scale=${W}:${H}:flags=neighbor[p${i}]`,
-    );
-    chains.push(`[s${i}][p${i}]overlay=x=${X}:y=${Y}:enable='between(t,${m.t0.toFixed(3)},${m.t1.toFixed(3)})'${outLabel}`);
+    if (W < 4 || H < 4) continue;
+    const key = `${W}x${H}`;
+    if (!groups.has(key)) groups.set(key, { w: W, h: H, terms: [] });
+    groups.get(key)!.terms.push({ x: X, y: Y, t0: m.t0, t1: m.t1 });
+  }
+  if (groups.size === 0) return "";
+
+  const chains: string[] = [];
+  let last = "[0:v]";
+  let gi = 0;
+  for (const g of groups.values()) {
+    // Same mosaic coarseness as the historical downscale-x12 pipeline.
+    const sw = Math.max(2, Math.round(g.w / 12));
+    const sh = Math.max(2, Math.round(g.h / 12));
+    const sum = (coord: (r: BurnGroup["terms"][number]) => number) =>
+      g.terms.map((r) => `${coord(r)}*between(t,${r.t0.toFixed(3)},${r.t1.toFixed(3)})`).join("+");
+    const xExpr = sum((r) => r.x);
+    const yExpr = sum((r) => r.y);
+    const enExpr = g.terms.map((r) => `between(t,${r.t0.toFixed(3)},${r.t1.toFixed(3)})`).join("+");
+    const inLabel = `[bg${gi}]`;
+    const tapLabel = `[tg${gi}]`;
+    const patchLabel = `[pg${gi}]`;
+    const outLabel = `[bg${gi + 1}]`;
+    chains.push(`${last}split=2${inLabel}${tapLabel}`);
+    // NOTE the tap chain's OUTPUT label ([pg]): leaving the tail unlabeled
+    // makes ffmpeg auto-map the 40x16 patch as an EXTRA output stream — that
+    // phantom encode then fails on NVENC min-dims and kills the whole export.
+    chains.push(`${tapLabel}crop=w=${g.w}:h=${g.h}:x='${xExpr}':y='${yExpr}',scale=${sw}:${sh}:flags=area,scale=${g.w}:${g.h}:flags=neighbor${patchLabel}`);
+    chains.push(`${inLabel}[pg${gi}]overlay=x='${xExpr}':y='${yExpr}':enable='${enExpr}'${outLabel}`);
     last = outLabel;
-  });
+    gi++;
+  }
+  chains.push(`${last}null[vout]`);
   return chains.join(";");
 }
 
@@ -342,13 +404,9 @@ export function concatArgs(listFile: string, out: string, reencode: boolean, fps
 export function audioPassStage(
   input: string,
   out: string,
-  opts: { trimSilence: boolean; silenceThresholdS: number; loudnorm: boolean; fps: number; w?: number; h?: number },
+  opts: { loudnorm: boolean; fps: number; w?: number; h?: number },
 ): StageBase {
   const af: string[] = [];
-  if (opts.trimSilence && opts.silenceThresholdS > 0) {
-    // Legacy-compatible threshold: the filter takes a fraction of full scale.
-    af.push(`silenceremove=stop_periods=-1:stop_threshold=${opts.silenceThresholdS * 0.01}`);
-  }
   if (opts.loudnorm) af.push("loudnorm=I=-16:TP=-1.5:LRA=11");
   return {
     kind: "audio",
@@ -404,8 +462,12 @@ export function zoomSpanStage(
   const cx = Math.round(Math.max(0, Math.min(p.width - cw, span.cx * p.width - cw / 2)));
   const cy = Math.round(Math.max(0, Math.min(p.height - ch, span.cy * p.height - ch / 2)));
 
-  let vf: string;
-  if (p.ease === "hold" || p.ease === "full") {
+  let vf: string | undefined;
+  if (p.ease === "full") {
+    // Identity pass: cropping the full frame and scaling it back to itself
+    // only burns encode time — omit the filter entirely.
+    vf = undefined;
+  } else if (p.ease === "hold") {
     vf = `crop=w=${cw}:h=${ch}:x=${cx}:y=${cy},scale=${p.width}:${p.height}`;
   } else if (p.ease === "glide") {
     // Constant depth; x/y pan from the previous focus to this one.
@@ -444,7 +506,7 @@ export function zoomSpanStage(
     label: `zoom span ${secs(span.startMs)}s ${span.depth > 1 ? `x${depth.toFixed(2)} @${span.cx.toFixed(2)},${span.cy.toFixed(2)}` : "full"} (${p.ease})`,
     args: [
       "-y", "-ss", secs(span.startMs), "-t", secs(dur), "-i", input,
-      "-vf", vf,
+      ...(vf ? ["-vf", vf] : []),
       "-map", "0:v:0", "-map", "0:a?",
       ...encArgs(p.width, p.height),
       "-r", String(p.fps),
@@ -473,6 +535,7 @@ export interface BrandParams {
   fontPath: string;
   title: string;
   slogan: string;
+  sloganEn?: string;
   durationS?: number;
 }
 
@@ -485,20 +548,139 @@ function escDrawtext(t: string): string {
  * slogan fading in/out — generated at export time via lavfi (no bundled asset).
  * Silent stereo track keeps the final concat uniform.
  */
+export interface BrandLayout {
+  portrait: boolean;
+  sloganSize: number;
+  /** Chinese slogan with inter-character spacing so it renders flush with the English line. */
+  justifiedSlogan: string;
+  logoW: number;
+  logoH: number;
+  logoX: number;
+  logoY: number;
+  /** Side-by-side (landscape): left edge shared by both text lines. */
+  textLeft?: number;
+  /** Side-by-side (landscape): y expressions relative to the line's own box. */
+  zhYExpr?: string;
+  enYExpr?: string;
+  /** Stacked (portrait): absolute top positions. */
+  zhY?: number;
+  enY?: number;
+}
+
+const LOGO_ASPECT = 1254 / 662;
+const CJK_ADV = 1.0;      // msyh CJK advance / fontsize (full width)
+const LATIN_ADV = 0.506;  // msyh latin/digit average (measured)
+const SPACE_ADV = 0.294;  // msyh space width (measured)
+
+function isCJK(ch: string): boolean {
+  const c = ch.codePointAt(0)!;
+  return c >= 0x2e80 && c <= 0x9fff;
+}
+
+function estTextWidth(s: string, fs: number): number {
+  let w = 0;
+  for (const ch of s) {
+    if (ch === " ") w += fs * SPACE_ADV;
+    else if (isCJK(ch)) w += fs * CJK_ADV;
+    else w += fs * LATIN_ADV;
+  }
+  return w;
+}
+
+/** Stretch a short CJK line to the English line's width by adding spaces
+ *  evenly between characters, so the two lines align on both ends. */
+function justifyToWidth(zh: string, en: string, fs: number): string {
+  const zhW = estTextWidth(zh, fs);
+  const enW = estTextWidth(en, fs);
+  const spaceW = fs * SPACE_ADV;
+  if (enW <= zhW || !en) return zh;
+  const gaps = Math.max(1, [...zh].length - 1);
+  const total = Math.round((enW - zhW) / spaceW);
+  const base = Math.floor(total / gaps);
+  const extra = total % gaps;
+  const parts: string[] = [];
+  const chars = [...zh];
+  for (let i = 0; i < chars.length; i++) {
+    parts.push(chars[i]);
+    if (i < gaps) parts.push(" ".repeat(base + (i < extra ? 1 : 0)));
+  }
+  return parts.join("");
+}
+
+export function brandLayout(width: number, height: number, zh: string, en: string): BrandLayout {
+  const portrait = height > width;
+  const size = 0.8 * (portrait ? 0.5 : 1 / 1.5);
+  const sloganSize = Math.round(height * 0.037 * size);
+  const gapFrac = portrait ? 0.026 : 0.035;
+  const lineH = Math.round(sloganSize * 1.31);
+  const lineGap = Math.round(sloganSize * 0.45);
+  const justifiedSlogan = justifyToWidth(zh, en, sloganSize);
+  if (portrait) {
+    // Stacked: the mark sits above the two slogan lines; each element is
+    // centred horizontally, and the whole stack is centred vertically.
+    const logoH = Math.round(height * 0.06);
+    const logoW = Math.round(logoH * LOGO_ASPECT);
+    const gapLogoText = Math.round(sloganSize * 1.8);
+    const textBlockH = (2 * lineH + lineGap) - (en ? 0 : lineH + lineGap);
+    const blockH = logoH + gapLogoText + textBlockH;
+    const top = Math.round((height - blockH) / 2);
+    const logoX = Math.round((width - logoW) / 2);
+    const logoY = top;
+    const zhY = top + logoH + gapLogoText;
+    const enY = zhY + lineH + lineGap;
+    return { portrait, sloganSize, justifiedSlogan, logoW, logoH, logoX, logoY, zhY, enY };
+  }
+  // Side-by-side: mark left, slogan block right, centred as a group. The
+  // justified Chinese line matches the English width, so the two right-aligned
+  // edges are flush.
+  const ink = Math.round(sloganSize * 0.96);
+  const logoH = ink + Math.round(height * gapFrac);
+  const logoW = Math.round(logoH * LOGO_ASPECT);
+  const gap = Math.max(16, Math.round(logoW * 0.2));
+  const enW = Math.round(estTextWidth(en, sloganSize));
+  const textBlockW = Math.max(estTextWidth(zh, sloganSize), enW);
+  const groupW = logoW + gap + textBlockW;
+  const logoX = Math.round((width - groupW) / 2);
+  const logoY = Math.round((height - logoH) / 2);
+  const textLeft = logoX + logoW + gap;
+  return {
+    portrait,
+    sloganSize,
+    justifiedSlogan,
+    logoW,
+    logoH,
+    logoX,
+    logoY,
+    textLeft,
+    zhYExpr: `(h-text_h)/2-(h*${(gapFrac / 2).toFixed(3)})`,
+    enYExpr: `(h-text_h)/2+(h*${(gapFrac / 2).toFixed(3)})`,
+  };
+}
+
 export function brandStage(out: string, p: BrandParams): StageBase {
   const fps = Math.max(1, Math.round(p.fps));
   const D = p.durationS ?? 2.8;
   const font = p.fontPath.replace(/\\/g, "/").replace(/:/g, "\\:");
-  const title = escDrawtext(p.title);
-  const slogan = escDrawtext(p.slogan);
-  const titleSize = Math.round(p.height * 0.096);
-  const sloganSize = Math.round(p.height * 0.037);
+  const L = brandLayout(p.width, p.height, p.slogan, p.sloganEn ?? "");
+  const sloganZh = escDrawtext(L.justifiedSlogan);
+  const sloganEn = p.sloganEn ? escDrawtext(p.sloganEn) : "";
   const fadeOutAt = (D - 0.7).toFixed(2);
-  const alphaMain = `if(lt(t,0.35),0,if(lt(t,1.15),(t-0.35)/0.8,if(lt(t,${fadeOutAt}),1,(${D}-t)/0.7)))`;
-  const alphaSub = `if(lt(t,0.70),0,if(lt(t,1.50),(t-0.70)/0.8,if(lt(t,${fadeOutAt}),1,(${D}-t)/0.7)))`;
-  const vf =
-    `drawtext=fontfile='${font}':text='${title}':fontcolor=0xE8E8F0:fontsize=${titleSize}:x=(w-text_w)/2:y=(h-text_h)/2-(h*0.045):alpha='${alphaMain}',` +
-    `drawtext=fontfile='${font}':text='${slogan}':fontcolor=0x9090A8:fontsize=${sloganSize}:x=(w-text_w)/2:y=(h-text_h)/2+(h*0.055):alpha='${alphaSub}'`;
+  const alphaZh = `if(lt(t,0.95),0,if(lt(t,1.65),(t-0.95)/0.7,if(lt(t,${fadeOutAt}),1,(${D}-t)/0.7)))`;
+  const alphaEn = `if(lt(t,1.10),0,if(lt(t,1.80),(t-1.10)/0.7,if(lt(t,${fadeOutAt}),1,(${D}-t)/0.7)))`;
+  const parts = L.portrait
+    ? [
+        `drawtext=fontfile='${font}':text='${sloganZh}':fontcolor=0x9090A8:fontsize=${L.sloganSize}:x=(w-text_w)/2:y=${L.zhY}:alpha='${alphaZh}'`,
+        ...(sloganEn
+          ? [`drawtext=fontfile='${font}':text='${sloganEn}':fontcolor=0x9090A8:fontsize=${L.sloganSize}:x=(w-text_w)/2:y=${L.enY}:alpha='${alphaEn}'`]
+          : []),
+      ]
+    : [
+        `drawtext=fontfile='${font}':text='${sloganZh}':fontcolor=0x9090A8:fontsize=${L.sloganSize}:x=${L.textLeft}:y=${L.zhYExpr}:alpha='${alphaZh}'`,
+        ...(sloganEn
+          ? [`drawtext=fontfile='${font}':text='${sloganEn}':fontcolor=0x9090A8:fontsize=${L.sloganSize}:x=${L.textLeft}:y=${L.enYExpr}:alpha='${alphaEn}'`]
+          : []),
+      ];
+  const vf = parts.join(",");
   return {
     kind: "brand",
     label: "brand outro",
@@ -518,25 +700,23 @@ export function brandStage(out: string, p: BrandParams): StageBase {
 }
 
 /**
- * Second brand pass: overlay the brand LOGO onto the text brand card. The logo
- * is scaled to min(28% W, 38% H), centered, bottom ~13% above the card centre
- * (clears the title row), and faded in/out on the text card's timeline.
- * Kept as a separate stage: drawtexton-text works with a plain -vf chain,
- * while a drawtext + overlay combo inside one -filter_complex hits a graph
- * parser quirk in the bundled ffmpeg, so the logo rides its own overlay pass.
+ * Second brand pass: overlay the brand mark onto the text card. The mark
+ * keeps the card's group geometry (brandLayout) and fades in BEFORE the
+ * slogan text. Kept as a separate stage: drawtext-on-text works with a plain
+ * -vf chain, while a drawtext + overlay combo inside one -filter_complex hits
+ * a graph parser quirk in the bundled ffmpeg, so the mark rides its own pass.
  */
 export function brandLogoStage(
   inPath: string,
   out: string,
-  p: { fps: number; width: number; height: number; logoPath: string },
+  p: { fps: number; width: number; height: number; logoPath: string; layout: BrandLayout },
 ): StageBase {
   const fps = Math.max(1, Math.round(p.fps));
   const D = 2.8;
   const fadeOutAt = (D - 0.7).toFixed(2);
-  const logoW = Math.round(Math.max(60, Math.min(p.width * 0.28, p.height * 0.38)));
   const filterComplex =
-    `[1:v]scale=${logoW}:-1,format=rgba,fade=t=in:st=0.3:d=0.8:alpha=1,fade=t=out:st=${fadeOutAt}:d=0.7:alpha=1[lg];` +
-    `[0:v][lg]overlay=x=(W-w)/2:y=H*0.37-h:shortest=1[v]`;
+    `[1:v]scale=${p.layout.logoW}:-1,format=rgba,fade=t=in:st=0.25:d=0.8:alpha=1,fade=t=out:st=${fadeOutAt}:d=0.7:alpha=1[lg];` +
+    `[0:v][lg]overlay=x=${p.layout.logoX}:y=${p.layout.logoY}:shortest=1[v]`;
   return {
     kind: "brand",
     label: "brand logo outro",
@@ -839,7 +1019,7 @@ export function planExport(input: PlanInput): ExportPlan {
   // cuts/speedups need the segment slice — a mask-only film avoids a wasteful
   // re-encode on top of the mask burn.
   const needsSegments = edl.edits.some((e) => e.type === "cut" || e.type === "speedup");
-  const needsAudioPass = settings.trimSilence || settings.loudnorm;
+  const needsAudioPass = settings.loudnorm;
   const needsBurn = settings.subtitles;
   const brandOn = settings.brandOutro;
   const needsFinalConcat = (settings.introEnabled && !!settings.introPath) || (settings.outroEnabled && !!settings.outroPath) || brandOn;
@@ -870,8 +1050,6 @@ export function planExport(input: PlanInput): ExportPlan {
   if (needsAudioPass) {
     intermediates.push(av);
     stages.push(audioPassStage(current, av, {
-      trimSilence: settings.trimSilence,
-      silenceThresholdS: settings.silenceThresholdS,
       loudnorm: settings.loudnorm,
       fps,
       w: srcW,
@@ -890,13 +1068,23 @@ export function planExport(input: PlanInput): ExportPlan {
 
   if (needsFinalConcat) {
     const parts: string[] = [];
-    if (settings.introEnabled && settings.introPath) parts.push(settings.introPath);
+    const partDurations: number[] = [];
+    const isImagePath = (p: string) => /\.(png|jpe?g|gif|webp|bmp)$/i.test(p);
+    if (settings.introEnabled && settings.introPath) {
+      parts.push(settings.introPath);
+      partDurations.push(isImagePath(settings.introPath) ? Math.max(0.1, settings.introDurationS) : 0);
+    }
     parts.push(current);
-    if (settings.outroEnabled && settings.outroPath) parts.push(settings.outroPath);
+    partDurations.push(0); // main timeline is a video; duration inherited
+    if (settings.outroEnabled && settings.outroPath) {
+      parts.push(settings.outroPath);
+      partDurations.push(isImagePath(settings.outroPath) ? Math.max(0.1, settings.outroDurationS) : 0);
+    }
     if (brandOn) {
       const hasLogo = !!settings.brandLogoPath;
       const textOut = hasLogo ? path.join(workDir, "brand_text.mp4") : path.join(workDir, "brand.mp4");
       intermediates.push(textOut);
+      const layout = brandLayout(srcW, srcH, settings.brandSlogan, settings.brandSloganEn ?? "");
       stages.push(brandStage(textOut, {
         fps,
         width: srcW,
@@ -904,10 +1092,11 @@ export function planExport(input: PlanInput): ExportPlan {
         fontPath: settings.brandFontPath,
         title: settings.brandTitle,
         slogan: settings.brandSlogan,
+        sloganEn: settings.brandSloganEn,
       }));
       let brandOut = textOut;
       if (hasLogo) {
-        // Logo pass overlays the brand mark onto the text card.
+        // Logo pass overlays the brand mark (left) onto the text card.
         brandOut = path.join(workDir, "brand.mp4");
         intermediates.push(brandOut);
         stages.push(brandLogoStage(textOut, brandOut, {
@@ -915,9 +1104,11 @@ export function planExport(input: PlanInput): ExportPlan {
           width: srcW,
           height: srcH,
           logoPath: settings.brandLogoPath,
+          layout,
         }));
       }
       parts.push(brandOut); // brand card is always the very last thing
+      partDurations.push(0); // brand card is a video; duration inherited
     }
     const listFile = path.join(workDir, "final_concat.txt");
     intermediates.push(listFile, mainFinal);
@@ -928,6 +1119,7 @@ export function planExport(input: PlanInput): ExportPlan {
       output: mainFinal,
       listFile,
       inputs: parts,
+      partDurations,
     });
     current = mainFinal;
   }

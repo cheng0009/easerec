@@ -124,8 +124,8 @@ export function SettingsDialog() {
         ], (
           <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 5 }}>
             <div style={hint2}>⏩ {L("快进模式：录制中的漫长等待（安装/加载/翻页）标记为快进段，导出时无论多长都压缩成 3-5 秒，并垫入轻快音效。", "Fast-forward: mark boring waits (installs/loading) — they compress to 3-5s with a whoosh at export.")}</div>
-            <div style={hint2}>🛡 {L("隐私遮挡：屏幕局部出现敏感信息（密钥/账号）时框选遮挡，出现马赛克块并自动回溯到内容首次出现处。", "Privacy mask: box sensitive regions (keys/accounts) — a mosaic block appears and auto-backtraces to its first appearance.")}</div>
-            <div style={hint2}>🔒 {L("隐私整段剪除：整屏私密操作（登录/输密码）成对标记起点终点，导出时整段剪掉。", "Privacy cut: mark whole private spans (logins/passwords) in pairs — removed entirely at export.")}</div>
+            <div style={hint2}>🛡 {L("隐私遮挡：屏幕局部出现敏感信息（密钥/账号）时按 F6 框选，马赛克自动回溯到内容首次出现处；画框前的宽限窗口（默认 8 秒，含画框动作）会整段剪除，声音一并删除。", "Privacy mask: press F6 and box sensitive regions (keys/accounts) — the mosaic auto-backtraces to its first appearance, and the pre-box grace window (default 8s, incl. the drawing itself) is cut entirely, audio included.")}</div>
+            <div style={hint2}>🔒 {L("隐私整段剪除：整屏私密操作（登录/输密码、切换到私密窗口）成对标记起点终点，导出时整段剪掉——适合无法用局部遮挡覆盖的场景。", "Privacy cut: mark whole private spans (logins, passwords, private windows) in pairs — removed entirely at export. For content a region mask can't cover.")}</div>
           </div>
         ))}
         {group("effects", L("导播特效", "Effects"), [
@@ -134,6 +134,13 @@ export function SettingsDialog() {
           ["toggle_highlighter", L("荧光笔", "Highlighter")],
           ["toggle_ripple", L("点击涟漪", "Click ripple")],
         ])}
+        {group("prompter", L("提词器", "Teleprompter"), [
+          ["toggle_prompter", L("显示 / 隐藏提词窗", "Show / hide teleprompter")],
+        ], (
+          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 5 }}>
+            <div style={hint2}>📜 {L("提词窗置顶浮于屏幕上，并被排除在录制画面之外（不会录进成片），可在工作台侧栏输入脚本。", "The teleprompter floats above the screen and is excluded from screen capture (never recorded). Type your script in the Studio sidebar.")}</div>
+          </div>
+        ))}
         <div style={{ marginTop: 8, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <span style={{ fontSize: 10, color: "var(--text-muted)" }}>{L("提示：被其他软件占用的键会自动以底层轮询兜底", "Keys grabbed by other apps fall back to low-level polling automatically")}</span>
           <button style={saveBtn} onClick={save}>{saved ? L("✓ 已保存", "✓ Saved") : L("保存快捷键", "Save shortcuts")}</button>
