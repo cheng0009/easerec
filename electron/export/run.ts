@@ -396,6 +396,9 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
   });
 
   const total = plan.stages.length;
+  // Set when the audio turned out to be silent — surfaced in the result so a
+  // film without subtitles reads as intentional, not as a bug.
+  let asrNote = "";
   if (process.env.DC_DUMP_PLAN) {
     console.error("[plan]", JSON.stringify(plan.stages.map((st) => ({ k: st.kind, l: st.label, out: st.output })), null, 1));
   }
@@ -504,6 +507,18 @@ ${tail}`;
         break;
       }
       case "asr": {
+        // Silent audio (recording enabled but nothing was actually captured)
+        // makes Whisper hallucinate fluent nonsense — gate the transcription
+        // on the track's peak level and tell the user the subs were skipped.
+        const wavPath = path.join(workDir, "audio16k.wav");
+        const peakDb = fs.existsSync(wavPath) ? await measurePeakLevelDb(ctx.ffmpegPath, wavPath) : null;
+        if (peakDb !== null && peakDb < -40) {
+          asrNote = `\n（音频为静音，峰值 ${peakDb === -Infinity ? "-inf" : peakDb.toFixed(1)} dB — 未生成字幕）`;
+          fs.writeFileSync(stage.output, generateAss([], req.settings.subtitleStyle, {
+            width: plan.outputSize.w, height: plan.outputSize.h,
+          }), "utf8");
+          break;
+        }
         const ok = await runAsrStage(req, workDir, stage.output);
         if (!ok) {
           // Subtitles were requested but ASR failed -> continue WITHOUT subs
@@ -586,10 +601,25 @@ ${tail}`;
   if (r.masks) parts.push(`遮挡 ${r.masks} 处`);
   if (r.speedups) parts.push(`快进 ${r.speedups} 段`);
   const suffix = parts.length ? `（${parts.join("，")}）` : "";
-  return `Saved to: ${req.outputPath}${suffix}`;
+  return `Saved to: ${req.outputPath}${suffix}${asrNote}`;
 }
 
 /** whisper -> optional LLM correction -> ASS. */
+/** Peak audio level of a wav in dBFS (volumedetect max_volume); null if the
+ *  measurement itself failed (callers fail open and transcribe as before). */
+async function measurePeakLevelDb(ffmpegPath: string, wav: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    const child = spawn(ffmpegPath, ["-hide_banner", "-i", wav, "-af", "volumedetect", "-f", "null", "-"], { windowsHide: true });
+    let out = "";
+    child.stderr?.on("data", (d: Buffer) => { out += d.toString(); });
+    child.on("error", () => resolve(null));
+    child.on("close", () => {
+      const m = out.match(/max_volume:\s*(-?[\d.]+|-inf)\s*dB/);
+      resolve(m ? (m[1] === "-inf" ? -Infinity : parseFloat(m[1])) : null);
+    });
+  });
+}
+
 async function runAsrStage(req: RunExportRequest, workDir: string, assFile: string): Promise<boolean> {
   const wav = path.join(workDir, "audio16k.wav");
   if (!fs.existsSync(wav)) return false;
