@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { useStore } from "../store";
 import { useTauriEvent } from "./useTauriEvent";
 import { getDirector } from "../recording/director";
+import { closeOpenMarksOnStop } from "../recording/marks";
 
 interface PerfPayload { fps: number; cpu_percent: number; dropped_frames: number; encoding_latency_ms: number; }
 interface TimePayload { elapsed_ms: number; }
@@ -50,6 +51,9 @@ export function useRecorderState() {
         useStore.getState().setUi({ reviewPath: null });
         await dir.beginRecording();
       } else {
+        // Same mark cleanup as the button/hotkey stop paths: close any open
+        // mask/pause windows so the EDL reflects the real stop moment.
+        closeOpenMarksOnStop();
         const savePath = await dir.stopAndSave();
         if (savePath) {
           try { localStorage.setItem("dc_last_save", savePath); } catch {}

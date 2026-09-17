@@ -100,6 +100,10 @@ export function ExportDrawer() {
           zoom_level: settings.zoomLevel ?? 1.5,
           brand_outro: settings.brandOutro,
           brand_lang: useStore.getState().current === "en" ? "en" : "zh",
+          voice_enhance: settings.voiceEnhance,
+          voice_enhance_strength: settings.voiceEnhanceStrength,
+          bgm_path: settings.bgmPath,
+          bgm_volume: settings.bgmVolume,
           loudnorm: settings.loudnorm,
           burn_subtitles: settings.subtitleEnabled,
           subtitle_style: settings.subtitleStyle,
@@ -178,6 +182,15 @@ export function ExportDrawer() {
     setHwSuggested(null); setHwPicked(new Set()); setHwMsg(null);
   };
 
+  const pickBgm = async () => {
+    const picked = await open({
+      multiple: false,
+      title: L("选择背景音乐", "Pick background music"),
+      filters: [{ name: "音频", extensions: ["mp3", "m4a", "aac", "wav", "ogg", "flac"] }],
+    });
+    if (typeof picked === "string") setSettings({ bgmPath: picked });
+  };
+
   const generateChapters = async () => {
     const match = result?.match(/Saved to: (.+?)(?:（|$)/);
     if (!match) return;
@@ -226,6 +239,42 @@ export function ExportDrawer() {
       )}
 
       <Group label={L("画面与音频", "Picture & audio")}>
+        <Toggle label={L("人声美化", "Voice enhance")} hint={L("去底噪与隆隆声，人声更清晰饱满（推荐讲话类录制开启）", "Denoise + rumble cut — clearer, fuller voice (best for talking)")} value={settings.voiceEnhance}
+          onChange={(v) => setSettings({ voiceEnhance: v })} />
+        {settings.voiceEnhance && (
+          <Row label={L("美化强度", "Strength")}>
+            <select value={settings.voiceEnhanceStrength} style={inp}
+              onChange={(e) => setSettings({ voiceEnhanceStrength: e.target.value as "light" | "standard" | "strong" })}>
+              <option value="light">{L("轻度 — 保留现场感", "Light — keep room feel")}</option>
+              <option value="standard">{L("标准 — 推荐", "Standard — recommended")}</option>
+              <option value="strong">{L("强劲 — 嘈杂环境", "Strong — noisy rooms")}</option>
+            </select>
+          </Row>
+        )}
+        <Row label={L("背景音乐", "BGM")}>
+          {!settings.bgmPath ? (
+            <button style={styles.miniBtn} onClick={() => void pickBgm()}>
+              🎵 {L("选择音乐文件（自动循环）", "Pick a music file (auto-looped)")}
+            </button>
+          ) : (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", minWidth: 0 }}>
+              <span title={settings.bgmPath} style={{ fontSize: 11, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                🎵 {settings.bgmPath.split(/[\\/]/).pop()}
+              </span>
+              <button style={styles.miniBtn} onClick={() => setSettings({ bgmPath: "" })} title={L("移除", "Remove")}>✕</button>
+            </div>
+          )}
+        </Row>
+        {settings.bgmPath && (
+          <Row label={L("音乐音量", "Music volume")}>
+            <select value={settings.bgmVolume} style={inp}
+              onChange={(e) => setSettings({ bgmVolume: e.target.value as "low" | "medium" | "high" })}>
+              <option value="low">{L("低 — 仅隐约可闻", "Low — barely audible")}</option>
+              <option value="medium">{L("中 — 推荐", "Medium — recommended")}</option>
+              <option value="high">{L("高 — 音乐为主", "High — music forward")}</option>
+            </select>
+          </Row>
+        )}
         <Toggle label={L("响度归一", "Loudness normalize")} hint={L("EBU R128，成片音量一致", "EBU R128 — consistent loudness")} value={settings.loudnorm}
           onChange={(v) => setSettings({ loudnorm: v })} />
         <Toggle label={L("同时导出竖版 9:16", "Also export vertical 9:16")} hint={L("按录制时的镜头轨迹自动取景（抖音/Shorts）", "Auto-reframed from the camera track (Douyin/Shorts)")} value={settings.verticalExport}

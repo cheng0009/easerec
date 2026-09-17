@@ -308,11 +308,14 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
               refPixels: ref.refPixels,
               refFrameHash: hashToHex(dHash(canonFrame, 8)),
               fps: 4,
+              dynamicEntranceMs: 30000,
               thresholds: { region: 0.72, frame: 0.62 },
             });
             if (bt.startMs !== null && bt.startMs < (m.startMs ?? 0)) {
               const idx = edits.indexOf(m);
-              edits[idx] = { ...m, startMs: bt.startMs, startSource: bt.method ?? "grace", pending: false };
+              // Preserve `pending`: an open (never F6-ended) mask must keep its
+              // end-of-recording extension through the export.
+              edits[idx] = { ...m, startMs: bt.startMs, startSource: bt.method ?? "grace" };
               patched++;
               ctx.onLog?.(`[track] backtrace (export) mask #${maskEdits.indexOf(m)} start ${m.startMs}ms -> ${bt.startMs}ms method ${bt.method}`);
             } else if (bt.startMs !== null) {

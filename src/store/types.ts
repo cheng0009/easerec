@@ -110,6 +110,14 @@ export interface SettingsState {
   asrLanguage: string;
   /** EBU R128 loudness normalization on export. */
   loudnorm: boolean;
+  /** Voice beautification chain on export (rumble cut + denoise + compression). */
+  voiceEnhance: boolean;
+  /** Voice beautification intensity ("light" | "standard" | "strong"). */
+  voiceEnhanceStrength: "light" | "standard" | "strong";
+  /** Background music file mixed (looped) under the voice on export. */
+  bgmPath: string;
+  /** Background music level ("low" | "medium" | "high"). */
+  bgmVolume: "low" | "medium" | "high";
   /** Also produce a 9:16 vertical reframe on export. */
   verticalExport: boolean;
   /** Privacy backtrace fallback window (seconds) when matching fails. */

@@ -1160,7 +1160,7 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>, _event?:
           refFrameHash: String(args.refFrameHash || ""),
           refPixels: String(args.refPixels || ""),
           fps: 4,
-          dynamicEntranceMs: 6000,
+          dynamicEntranceMs: 30000,
           // The reference is sampled from full-res live pixels but the scan
           // compares at 256x144 — the resampling drops every similarity, so the
           // strict defaults routinely false-negative a legitimate first match
@@ -1172,12 +1172,26 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>, _event?:
           if (session !== activeSession) return;
           const cur = session.getEdl().edits[index];
           if (!cur || cur.type !== "mask") return;
-          if (res.startMs !== null) {
-            session.updateEdit(index, { ...cur, startMs: res.startMs, startSource: res.method ?? "grace", pending: false });
+          // The mask is still OPEN here (only privacy_mark_end closes it) —
+          // never flip pending, and never move the start LATER: a weaker match
+          // near the draw moment must not shrink the grace window (the
+          // pre-press frames between grace and the shrunk start would leak).
+          if (res.startMs !== null && res.startMs < cur.startMs) {
+            session.updateEdit(index, { ...cur, startMs: res.startMs, startSource: res.method ?? "grace" });
+            // The paired F6 auto-cut (delete window before the box) follows the
+            // traced first appearance — the pre-press span is DELETED, not
+            // merely mosaicked.
+            const edits = session.getEdl().edits;
+            for (let ci = 0; ci < edits.length; ci++) {
+              const c = edits[ci];
+              if (c.type === "cut" && (c as { reason?: string }).reason === "privacy" && Math.abs(c.startMs - cur.startMs) < 50) {
+                session.updateEdit(ci, { ...c, startMs: res.startMs });
+                break;
+              }
+            }
             pushEvent("dc-privacy-backtrace", { index, startMs: res.startMs, method: res.method });
           } else {
-            // Ladder failed: keep the grace-window start, clear "pending".
-            session.updateEdit(index, { ...cur, pending: false, startSource: "grace" });
+            // No earlier match: keep the grace-window start (mask still open).
             pushEvent("dc-privacy-backtrace", { index, startMs: cur.startMs, method: "grace" });
           }
         }).catch((e) => console.warn("[directorcam] backtrace failed:", e));
@@ -1261,7 +1275,9 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>, _event?:
     case "save_recording": {
       if (!lastSavedRecording) {
         const s = loadSettings().last_saved_recording;
-        if (typeof s === "string" && s) lastSavedRecording = s;
+        // Only recordings qualify — older settings may hold a stale export
+        // output (poisoned before this guard), never re-process that.
+        if (typeof s === "string" && s && /\.webm$/i.test(s)) lastSavedRecording = s;
       }
       return lastSavedRecording ?? "";
     }
@@ -1503,6 +1519,10 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
     brandSlogan: brandZh ? "让知识输出回归纯粹" : "Recording, simplified.",
     brandSloganEn: brandZh ? "Let knowledge output return to purity." : "",
     loudnorm: config.loudnorm === true,
+    voiceEnhance: config.voice_enhance === true,
+    voiceEnhanceStrength: String(config.voice_enhance_strength || "standard"),
+    bgmPath: String(config.bgm_path || ""),
+    bgmVolume: String(config.bgm_volume || "medium"),
     subtitles: config.burn_subtitles === true,
     subtitleStyle: {
       fontFamily: String(style.fontFamily || "Microsoft YaHei"),
@@ -1560,8 +1580,10 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
     },
   });
   if (result.startsWith("Saved to:")) {
-    lastSavedRecording = outputPath;
-    try { saveSettings({ last_saved_recording: outputPath }); } catch { /* ignore */ }
+    // NEVER let the export OUTPUT become the "recording to export": the next
+    // export would re-process the finished film (double subtitles, second
+    // brand outro, re-applied zoom). lastSavedRecording stays pinned to the
+    // actual recording until a new one is made.
   }
   if (config.zoom_enabled === true && mouseTrack.length <= 5) {
     return result + "\n⚠ 该录像没有鼠标轨迹（旧版本录制或未开启跟焦），本次导出未渲染智能跟焦。";

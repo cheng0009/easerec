@@ -51,6 +51,14 @@ export interface ExportSettings {
   /** Optional English slogan rendered under the main slogan. */
   brandSloganEn?: string;
   loudnorm: boolean;
+  /** Voice beautification chain (denoise + rumble cut + compression). */
+  voiceEnhance?: boolean;
+  /** Voice beautification intensity ("light" | "standard" | "strong"). */
+  voiceEnhanceStrength?: string;
+  /** Background music mixed (looped) under the voice. */
+  bgmPath?: string;
+  /** Background music level ("low" | "medium" | "high"). */
+  bgmVolume?: string;
   subtitles: boolean;
   subtitleStyle: SubtitleStyle;
   llmEnabled: boolean;
@@ -401,19 +409,56 @@ export function concatArgs(listFile: string, out: string, reencode: boolean, fps
   return [...common, "-c", "copy", "-movflags", "+faststart", out];
 }
 
+/** Voice-beautification audio chain per strength: rumble cut (highpass),
+ *  FFT denoise of steady background (fans/hiss), then gentle compression to
+ *  even out level and lift presence. Kept conservative — speech, not music. */
+export function voiceEnhanceChain(strength: string | undefined): string[] {
+  if (strength === "light") {
+    return ["highpass=f=80", "afftdn=nr=8:nf=-25", "acompressor=threshold=0.06:ratio=1.8:attack=25:release=250:makeup=1.3"];
+  }
+  if (strength === "strong") {
+    return ["highpass=f=90", "afftdn=nr=18:nf=-28", "acompressor=threshold=0.04:ratio=3:attack=15:release=200:makeup=2.5"];
+  }
+  return ["highpass=f=75", "afftdn=nr=12:nf=-25", "acompressor=threshold=0.05:ratio=2.2:attack=20:release=220:makeup=1.8"];
+}
+
 export function audioPassStage(
   input: string,
   out: string,
-  opts: { loudnorm: boolean; fps: number; w?: number; h?: number },
+  opts: {
+    loudnorm: boolean;
+    voiceEnhance?: string | false;
+    bgm?: string | null;
+    bgmVolume?: string;
+    fps: number;
+    w?: number;
+    h?: number;
+  },
 ): StageBase {
-  const af: string[] = [];
-  if (opts.loudnorm) af.push("loudnorm=I=-16:TP=-1.5:LRA=11");
-  return {
-    kind: "audio",
-    label: `audio pass (${af.join(" + ") || "passthrough"})`,
-    args: ["-y", "-i", input, ...(af.length ? ["-af", af.join(",")] : []), ...encArgs(opts.w ?? 1920, opts.h ?? 1080), "-r", String(opts.fps), "-movflags", "+faststart", out],
-    output: out,
-  };
+  const voice: string[] = [];
+  if (opts.voiceEnhance) voice.push(...voiceEnhanceChain(String(opts.voiceEnhance)));
+  if (opts.loudnorm) voice.push("loudnorm=I=-16:TP=-1.5:LRA=11");
+
+  const parts = [...voice, opts.bgm ? "bgm" : ""].filter(Boolean);
+  const label = `audio pass (${parts.join(" + ") || "passthrough"})`;
+  const args: string[] = ["-y", "-i", input];
+
+  if (opts.bgm) {
+    // Voice chain first, then the music (infinitely looped via -stream_loop,
+    // capped by the voice track via duration=first) mixed UNDER it at the
+    // configured level — normalize=0 keeps amix from halving both levels.
+    const level = opts.bgmVolume === "low" ? "0.10" : opts.bgmVolume === "high" ? "0.35" : "0.20";
+    args.push("-stream_loop", "-1", "-i", opts.bgm);
+    const fc =
+      `[0:a]${voice.join(",") || "anull"}[va];` +
+      `[1:a]volume=${level}[m];` +
+      `[va][m]amix=inputs=2:duration=first:normalize=0[aout]`;
+    args.push("-filter_complex", fc, "-map", "0:v:0", "-map", "[aout]");
+  } else {
+    if (voice.length) args.push("-af", voice.join(","));
+  }
+  args.push(...encArgs(opts.w ?? 1920, opts.h ?? 1080), "-r", String(opts.fps), "-movflags", "+faststart", out);
+  return { kind: "audio", label, args, output: out };
 }
 
 export function burnStage(input: string, out: string, assPath: string, fps: number, size: { w: number; h: number } = { w: 1920, h: 1080 }): StageBase {
@@ -1019,7 +1064,7 @@ export function planExport(input: PlanInput): ExportPlan {
   // cuts/speedups need the segment slice — a mask-only film avoids a wasteful
   // re-encode on top of the mask burn.
   const needsSegments = edl.edits.some((e) => e.type === "cut" || e.type === "speedup");
-  const needsAudioPass = settings.loudnorm;
+  const needsAudioPass = settings.loudnorm || !!settings.voiceEnhance || !!settings.bgmPath;
   const needsBurn = settings.subtitles;
   const brandOn = settings.brandOutro;
   const needsFinalConcat = (settings.introEnabled && !!settings.introPath) || (settings.outroEnabled && !!settings.outroPath) || brandOn;
@@ -1047,10 +1092,17 @@ export function planExport(input: PlanInput): ExportPlan {
 
   let current = needsSegments ? timeline : pipelineInput;
 
+  // ASR must hear the timeline BEFORE the music mix — Whisper transcribing
+  // the BGM would hallucinate subtitles over the music.
+  const preBgmTimeline = current;
+
   if (needsAudioPass) {
     intermediates.push(av);
     stages.push(audioPassStage(current, av, {
       loudnorm: settings.loudnorm,
+      voiceEnhance: settings.voiceEnhance ? (settings.voiceEnhanceStrength || "standard") : false,
+      bgm: settings.bgmPath || null,
+      bgmVolume: settings.bgmVolume,
       fps,
       w: srcW,
       h: srcH,
@@ -1060,7 +1112,7 @@ export function planExport(input: PlanInput): ExportPlan {
 
   if (needsBurn) {
     intermediates.push(wav, assFile, subbed);
-    stages.push(extractWavStage(current, wav));
+    stages.push(extractWavStage(preBgmTimeline, wav));
     stages.push({ kind: "asr", label: "transcribe + optional LLM correction", args: null, output: assFile });
     stages.push(burnStage(current, subbed, assFile, fps, { w: srcW, h: srcH }));
     current = subbed;

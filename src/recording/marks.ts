@@ -241,10 +241,19 @@ function handleBacktrace(p: { index: number; startMs: number; method: string }):
   const edits = [...st.marks.edits];
   if (p.index >= 0 && p.index < edits.length && edits[p.index]?.type === "mask") {
     const m = { ...(edits[p.index] as { startMs: number; pending?: boolean; startSource?: string }) };
+    // The refinement may only move the start EARLIER — a later "match" near
+    // the draw moment would shrink the grace window and leak pre-press frames.
+    if (p.startMs >= m.startMs) {
+      feedback(isZhLang() ? "✅ 未发现更早的出现位置（起点保持不变）— 遮挡仍在生效，再按 F6 结束" : "✅ No earlier appearance found (start kept) — mask still live, F6 to end");
+      return;
+    }
+    const cutIdx = edits.findIndex((e) => e.type === "cut" && e.reason === "privacy" && Math.abs(e.startMs - m.startMs) < 50);
     m.startMs = p.startMs;
-    m.pending = false;
     m.startSource = p.method;
+    // pending untouched — the mask is still open until F6 end / recording stop.
     edits[p.index] = m as EditEntry;
+    // The paired F6 auto-cut (delete window before the box) follows along.
+    if (cutIdx >= 0) edits[cutIdx] = { ...edits[cutIdx], startMs: p.startMs };
     st.setMarks({ edits });
   }
   const zh = isZhLang();
@@ -336,6 +345,10 @@ export function closeOpenMarksOnStop(): void {
     if (end - start >= 200) void appendEdit({ type: "cut", startMs: start, endMs: end, reason: "pause" });
   }
   if (st.marks.activePrivacy) {
+    // Close the mask WINDOW at the stop moment — a recording that ends with
+    // the box still up must stay covered to the very last frame. Without this
+    // the EDL edit keeps its placeholder end (mask-start + 1s).
+    void dcInvoke("privacy_mark_end", { nowMs: nowMs() }).catch(() => {});
     void dcInvoke("overlay_privacy_box", { rect: null }).catch(() => {});
   }
   if (st.marks.privacyDrawing) {
