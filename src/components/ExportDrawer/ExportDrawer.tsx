@@ -89,7 +89,7 @@ export function ExportDrawer() {
       const pad = (n: number) => String(n).padStart(2, "0");
       const now = new Date();
       const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-      const outputPath = `${base}/easeocr_${stamp}.mp4`;
+      const outputPath = `${base}/easerec_${stamp}.mp4`;
 
       const msg = await tauriInvoke<string>("export_video", {
         inputPath: savedPath,
