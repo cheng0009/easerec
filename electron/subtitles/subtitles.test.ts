@@ -164,6 +164,13 @@ describe("whisper output parsing", () => {
     expect(args).toContain("-l");
     expect(args.slice(args.indexOf("-l") + 1, args.indexOf("-l") + 2)).toEqual(["zh"]);
   });
+
+  it("passes anti-hallucination flags so silent audio cannot invent subtitles", () => {
+    const args = buildWhisperArgs("a.wav", "out/asr", "m.bin", {});
+    expect(args.includes("-nth")).toBe(true);
+    expect(args[args.indexOf("-nth") + 1]).toBe("0.60");
+    expect(args).toContain("-nf");
+  });
 });
 
 // ---------------------------------------------------------------------------

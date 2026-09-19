@@ -885,6 +885,12 @@ export interface PlanInput {
   mouseTrack?: { tMs: number; x: number; y: number }[];
   /** Region-recording crop (normalized primary-screen), if set. */
   recordRegion?: { x: number; y: number; w: number; h: number } | null;
+  /** Whether the input actually carries an audio stream (probed by the runner).
+   *  Absent/undefined keeps the legacy behavior (proceed as if audio exists);
+   *  false skips the whole audio pipeline — no WAV extract, no Whisper, no
+   *  subtitle burn — so a no-audio recording can never fake subtitles or crash
+   *  the export at the extract stage. */
+  hasAudio?: boolean;
   /** Probed pixel size of the captured video — the basis for mapping the
    *  normalized region to crop pixels (settings.resolution only sizes
    *  canvas-mode recordings; raw captures keep the display's native size). */
@@ -1088,8 +1094,9 @@ export function planExport(input: PlanInput): ExportPlan {
   // cuts/speedups need the segment slice — a mask-only film avoids a wasteful
   // re-encode on top of the mask burn.
   const needsSegments = edl.edits.some((e) => e.type === "cut" || e.type === "speedup");
-  const needsAudioPass = settings.loudnorm || !!settings.voiceEnhance || !!settings.bgmPath;
-  const needsBurn = settings.subtitles;
+  const hasAudio = input.hasAudio !== false;
+  const needsAudioPass = (settings.loudnorm || !!settings.voiceEnhance || !!settings.bgmPath) && hasAudio;
+  const needsBurn = settings.subtitles && hasAudio;
   const brandOn = settings.brandOutro;
   const needsFinalConcat = (settings.introEnabled && !!settings.introPath) || (settings.outroEnabled && !!settings.outroPath) || brandOn;
 

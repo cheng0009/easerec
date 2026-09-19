@@ -247,12 +247,19 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
   // The same probe feeds the privacy-mosaic burn geometry (masks are recorded
   // in normalized frame coords that need the true pixel size).
   const maskEditsPresent = Array.isArray(req.edl.edits) && req.edl.edits.some((e) => e.type === "mask");
+  // Any audio-consuming feature (subtitles / loudnorm / voice enhance / BGM)
+  // needs to know whether the recording has an audio stream AT ALL — a
+  // no-audio recording must not schedule the WAV-extract + Whisper + burn
+  // stages (they would fail at extract, or hallucinate fake subtitles).
+  const wantsAudioProcessing = req.settings.subtitles || req.settings.loudnorm || !!req.settings.voiceEnhance || !!req.settings.bgmPath;
   let inputVideoSize: { width: number; height: number } | null = null;
-  if ((req.recordRegion && req.recordRegion.w > 0.02 && req.recordRegion.h > 0.02) || maskEditsPresent) {
+  let hasAudio: boolean | undefined;
+  if ((req.recordRegion && req.recordRegion.w > 0.02 && req.recordRegion.h > 0.02) || maskEditsPresent || wantsAudioProcessing) {
     const info = await probeMedia(ctx.ffmpegPath, inputPath);
     if (info.width > 0 && info.height > 0) {
       inputVideoSize = { width: info.width, height: info.height };
     }
+    if (wantsAudioProcessing) hasAudio = info.hasAudio;
   }
 
   // Occurrence scan: with masks in the EDL, rewind the whole recording and find
@@ -396,12 +403,18 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
     recordRegion: req.recordRegion ?? null,
     inputVideoSize,
     maskTracks,
+    hasAudio,
   });
 
   const total = plan.stages.length;
   // Set when the audio turned out to be silent — surfaced in the result so a
   // film without subtitles reads as intentional, not as a bug.
   let asrNote = "";
+  // Subtitles were requested but the recording has NO audio stream: the plan
+  // already dropped the extract/asr/burn stages — tell the user why.
+  if (req.settings.subtitles && hasAudio === false) {
+    asrNote = "\n（未检测到音轨 — 未生成字幕）";
+  }
   if (process.env.DC_DUMP_PLAN) {
     console.error("[plan]", JSON.stringify(plan.stages.map((st) => ({ k: st.kind, l: st.label, out: st.output })), null, 1));
   }
@@ -510,13 +523,21 @@ ${tail}`;
         break;
       }
       case "asr": {
-        // Silent audio (recording enabled but nothing was actually captured)
-        // makes Whisper hallucinate fluent nonsense — gate the transcription
-        // on the track's peak level and tell the user the subs were skipped.
+        // Sustained-speech gate: a "recording" whose audio is genuinely silent
+        // (or so quiet it is below a noise floor) makes Whisper hallucinate
+        // fluent nonsense — measure the real signal TIME via silencedetect and
+        // skip transcription when there is nothing audible. This FIRMLY fails
+        // closed: a missing/empty/unreadable wav (e.g. no audio stream) counts
+        // as 0 active ms, so no wav state can ever feed Whisper fake silence.
         const wavPath = path.join(workDir, "audio16k.wav");
-        const peakDb = fs.existsSync(wavPath) ? await measurePeakLevelDb(ctx.ffmpegPath, wavPath) : null;
-        if (peakDb !== null && peakDb < -40) {
-          asrNote = `\n（音频为静音，峰值 ${peakDb === -Infinity ? "-inf" : peakDb.toFixed(1)} dB — 未生成字幕）`;
+        const activeMs = fs.existsSync(wavPath)
+          ? await measureActiveMs(ctx.ffmpegPath, wavPath)
+          : 0;
+        const speechMs = activeMs ?? 0;
+        if (speechMs < MIN_ACTIVE_SPEECH_MS) {
+          asrNote = speechMs > 0
+            ? `\n（音频无有效语音，仅 ${speechMs} 毫秒底噪 — 未生成字幕）`
+            : "\n（音频为静音，未生成字幕）";
           fs.writeFileSync(stage.output, generateAss([], req.settings.subtitleStyle, {
             width: plan.outputSize.w, height: plan.outputSize.h,
           }), "utf8");
@@ -608,17 +629,43 @@ ${tail}`;
 }
 
 /** whisper -> optional LLM correction -> ASS. */
-/** Peak audio level of a wav in dBFS (volumedetect max_volume); null if the
- *  measurement itself failed (callers fail open and transcribe as before). */
-async function measurePeakLevelDb(ffmpegPath: string, wav: string): Promise<number | null> {
+/** Silence gate constants: audio below -35dB sustained for ≥0.4s counts as
+ *  silence; < MIN_ACTIVE_SPEECH_MS of non-silent audio is "no real speech". */
+const SILENCE_NOISE_DB = -35;
+const SILENCE_MIN_S = 0.4;
+const MIN_ACTIVE_SPEECH_MS = 800;
+
+/** Total non-silent ("active") time of a wav in ms, via ffmpeg silencedetect.
+ *  Returns null only when the measurement itself fails (missing/corrupt wav) —
+ *  callers FAIL CLOSED and treat that as silence, so a broken or empty extract
+ *  can never flow into Whisper as though it were real speech. */
+async function measureActiveMs(ffmpegPath: string, wav: string): Promise<number | null> {
   return new Promise((resolve) => {
-    const child = spawn(ffmpegPath, ["-hide_banner", "-i", wav, "-af", "volumedetect", "-f", "null", "-"], { windowsHide: true });
+    const child = spawn(ffmpegPath, [
+      "-hide_banner", "-i", wav,
+      "-af", `silencedetect=noise=${SILENCE_NOISE_DB}dB:d=${SILENCE_MIN_S}`,
+      "-f", "null", "-",
+    ], { windowsHide: true });
     let out = "";
     child.stderr?.on("data", (d: Buffer) => { out += d.toString(); });
     child.on("error", () => resolve(null));
     child.on("close", () => {
-      const m = out.match(/max_volume:\s*(-?[\d.]+|-inf)\s*dB/);
-      resolve(m ? (m[1] === "-inf" ? -Infinity : parseFloat(m[1])) : null);
+      const dur = out.match(/Duration:\s*(\d+):(\d{2}):(\d{2})\.(\d+)/);
+      if (!dur) return resolve(null);
+      const totalMs = ((+dur[1] * 3600) + (+dur[2] * 60) + +dur[3] + Number(`0.${dur[4]}`)) * 1000;
+      // silencedetect prints alternating silence_start / silence_end lines;
+      // a trailing silence to EOF has a start but no end — close it at the EOF.
+      let silentMs = 0;
+      let curStart: number | null = null;
+      const re = /silence_(start|end):\s*([\d.]+)/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(out)) !== null) {
+        const t = parseFloat(m[2]) * 1000;
+        if (m[1] === "start") curStart = t;
+        else if (curStart !== null) { silentMs += t - curStart; curStart = null; }
+      }
+      if (curStart !== null) silentMs += Math.max(0, totalMs - curStart);
+      resolve(Math.max(0, Math.round(totalMs - silentMs)));
     });
   });
 }

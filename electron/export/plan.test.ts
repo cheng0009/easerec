@@ -171,6 +171,31 @@ describe("planExport", () => {
     expect(burn.output).toContain("subbed.mp4");
   });
 
+  it("skips extract/asr/burn entirely when the recording has no audio stream", () => {
+    // subtitles requested + no audio track must NOT schedule wav-extract /
+    // whisper / subtitle burn — otherwise the extract fails hard, or Whisper
+    // hallucinates fake subtitles over the silence.
+    const settings = { ...baseSettings(), loudnorm: true, subtitles: true };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings, hasAudio: false,
+    });
+    const kinds = kindsOf(plan.stages);
+    expect(kinds).not.toContain("audio");
+    expect(kinds).not.toContain("asr");
+    expect(kinds).not.toContain("burn");
+    expect(plan.stages.some((s) => s.output.includes("audio16k.wav"))).toBe(false);
+  });
+
+  it("keeps the subtitle pipeline when hasAudio is absent (legacy default)", () => {
+    const settings = { ...baseSettings(), loudnorm: true, subtitles: true };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings,
+    });
+    expect(kindsOf(plan.stages)).toEqual(["audio", "transcode", "asr", "burn", "transcode"]);
+  });
+
   it("burn uses a relative ass path with cwd (Windows colon-safe)", () => {
     const st = burnStage("C:\\tmp\\subbed.mp4", "C:\\tmp\\out.mp4", "C:\\tmp\\work\\subs.ass", 30);
     const vf = st.args![st.args!.indexOf("-vf") + 1];

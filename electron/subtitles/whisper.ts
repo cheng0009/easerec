@@ -71,6 +71,11 @@ export function buildWhisperArgs(
     // Initial prompt biases the tokenizer toward the user's vocabulary.
     args.push("--prompt", `术语表：${opts.glossary.trim()}\n以下是普通话转写。`);
   }
+  // Anti-hallucination: no-speech-thold drops segments whisper itself rates as
+  // non-speech (silence/noise that triggers the "invented narration" failure
+  // mode), and -nf disables the temperature fallback whose high-temp sampling
+  // is the most common source of fake transcriptions.
+  args.push("-nth", "0.60", "-nf");
   return args;
 }
 

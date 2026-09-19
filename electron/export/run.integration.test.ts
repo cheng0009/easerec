@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { execFfmpeg, runExportPipeline, type RunContext } from "./run";
+import { execFfmpeg, probeMedia, runExportPipeline, type RunContext } from "./run";
 import { planExport, type ExportSettings } from "./plan";
 import { appendEdit, emptyEdl, type CutEdit, type EdlFile, type SpeedupEdit } from "../../src/recording/edl";
 import type { OccurrenceRun } from "../../src/lib/perceptualHash";
@@ -53,6 +53,28 @@ function generateImage(file: string): string {
     file,
   ], { stdio: "ignore", timeout: 60000 });
   return file;
+}
+
+/** Video-only input (NO audio stream) — a session where mic/system were never
+ *  captured, or every audio permission was denied. */
+function generateVideoOnlyInput(file: string, seconds: number): void {
+  execFileSync(FFMPEG, [
+    "-y",
+    "-f", "lavfi", "-i", `testsrc2=size=320x240:rate=15:duration=${seconds}`,
+    "-c:v", "mpeg4", "-q:v", "6", "-an",
+    file,
+  ], { stdio: "ignore", timeout: 60000 });
+}
+
+/** Input with a real audio track that is digitally silent (muted mic). */
+function generateSilentInput(file: string, seconds: number): void {
+  execFileSync(FFMPEG, [
+    "-y",
+    "-f", "lavfi", "-i", `testsrc2=size=320x240:rate=15:duration=${seconds}`,
+    "-f", "lavfi", "-i", `anullsrc=r=48000:cl=stereo:d=${seconds}`,
+    "-c:v", "mpeg4", "-q:v", "6", "-c:a", "aac",
+    file,
+  ], { stdio: "ignore", timeout: 60000 });
 }
 
 function probeDurationSecs(file: string): Promise<number> {
@@ -229,6 +251,48 @@ describe.runIf(hasFfmpeg)("export pipeline (real ffmpeg)", () => {
     });
     expect(res).toContain("Saved to:");
     expect(existsSync(output)).toBe(true);
+  }, 120000);
+
+  it("no audio stream + subtitles on: export succeeds, ASR/burn skipped, no fake subs", async () => {
+    // Regression: subtitles requested on a video-only recording used to crash
+    // at "extract mono 16k wav for ASR" (ffmpeg can't extract a stream that
+    // does not exist). The plan must drop the whole extract/asr/burn chain and
+    // the export must complete with a "no audio track" note.
+    const input = path.join(dir, "noaudio.mp4");
+    const output = path.join(dir, "noaudio_out.mp4");
+    generateVideoOnlyInput(input, 4);
+    const settings = { ...baseSettings(), subtitles: true };
+    const res = await runExportPipeline({
+      inputPath: input, outputPath: output, outDir: dir,
+      edl: emptyEdl(), durationMs: 4000, settings,
+      llmConfig: { enabled: false, baseUrl: "", apiKey: "", model: "" },
+      ctx: ctx(),
+    });
+    expect(res).toContain("Saved to:");
+    expect(res).toContain("未检测到音轨");
+    expect(existsSync(output)).toBe(true);
+    const info = await probeMedia(FFMPEG, output);
+    expect(info.durationS).toBeCloseTo(4, 0);
+  }, 120000);
+
+  it("silent audio + subtitles on: the speech gate skips Whisper, burn copies through", async () => {
+    // A valid-but-silent track (muted mic) must not reach Whisper: the
+    // fail-closed silencedetect gate writes an empty ASS and the burn stage
+    // stream-copies instead of re-encoding a whole film for fake subtitles.
+    const input = path.join(dir, "silent.mp4");
+    const output = path.join(dir, "silent_out.mp4");
+    generateSilentInput(input, 4);
+    const settings = { ...baseSettings(), subtitles: true, loudnorm: true };
+    const res = await runExportPipeline({
+      inputPath: input, outputPath: output, outDir: dir,
+      edl: emptyEdl(), durationMs: 4000, settings,
+      llmConfig: { enabled: false, baseUrl: "", apiKey: "", model: "" },
+      ctx: ctx(),
+    });
+    expect(res).toContain("Saved to:");
+    expect(res).toContain("未生成字幕");
+    expect(existsSync(output)).toBe(true);
+    expect(await probeDurationSecs(output)).toBeCloseTo(4, 0);
   }, 120000);
 
   it("F6-before windows get covered: canonical backtrace + occurrence scan close the leak", async () => {
