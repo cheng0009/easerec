@@ -345,14 +345,37 @@ export function maskBurnStage(
 // Stage builders
 // ---------------------------------------------------------------------------
 
+/** Centered "fast-forward here" label burned over a compressed F4 segment.
+ *  Replaces the recording-time operator banner: the film itself must tell the
+ *  viewer the time was sped through (the whoosh is audio side of the same cue). */
+export interface FfLabelSpec {
+  text: string;
+  fontPath: string;
+}
+
+export function buildFfLabel(fontPath: string): FfLabelSpec | null {
+  if (!fontPath) return null;
+  return { text: "此处快进", fontPath };
+}
+
+function ffLabelFilter(label: FfLabelSpec, width: number): string {
+  const font = label.fontPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+  const text = escDrawtext(label.text);
+  const size = Math.max(28, Math.round(width * 0.042));
+  return `drawtext=fontfile='${font}':text='${text}':fontcolor=0xFFFFFF:fontsize=${size}:box=1:boxcolor=0x000000@0.45:boxborderw=${Math.round(size * 0.35)}:x=(w-text_w)/2:y=(h-text_h)/2`;
+}
+
 /** Extract + encode one timeline segment. `-ss` before `-i` is frame-accurate
- *  when re-encoding (ffmpeg seeks to the keyframe then decodes forward). */
+ *  when re-encoding (ffmpeg seeks to the keyframe then decodes forward).
+ *  `ffLabel`, when set, is burned centered on COMPRESSED segments so a
+ *  fast-forward reads as intentional in the finished film. */
 export function segmentStage(
   input: string,
   out: string,
   seg: TimelineSegment,
   fps: number,
   outSize: { w: number; h: number } = { w: 1920, h: 1080 },
+  ffLabel: FfLabelSpec | null = null,
 ): StageBase {
   const dur = seg.srcEndMs - seg.srcStartMs;
   const base: string[] = ["-y", "-ss", secs(seg.srcStartMs), "-t", secs(dur), "-i", input];
@@ -369,6 +392,7 @@ export function segmentStage(
   } else {
     const outSecs = (seg.outEndMs - seg.outStartMs) / 1000;
     const via = seg.via as { audio: "mute" | "whoosh" };
+    const ffFilter = ffLabel ? `,${ffLabelFilter(ffLabel, outSize.w)}` : "";
     if (via.audio === "whoosh") {
       // Video retimed; source audio replaced by a soft filtered-noise "whoosh".
       const fadeStart = Math.max(0, outSecs - 0.3);
@@ -376,7 +400,7 @@ export function segmentStage(
         ...base,
         "-f", "lavfi", "-i", `anoisesrc=color=pink:r=48000:amplitude=0.35:d=${secs(seg.outEndMs - seg.outStartMs)}`,
         "-filter_complex",
-        `[0:v]setpts=PTS/${seg.speed.toFixed(6)}[v];` +
+        `[0:v]setpts=PTS/${seg.speed.toFixed(6)}${ffFilter}[v];` +
         `[1:a]lowpass=f=900,afade=t=in:st=0:d=0.3,afade=t=out:st=${secs(fadeStart * 1000)}:d=0.3[a]`,
         "-map", "[v]", "-map", "[a]",
         ...encArgs(outSize.w, outSize.h),
@@ -387,7 +411,7 @@ export function segmentStage(
     } else {
       args = [
         ...base,
-        "-vf", `setpts=PTS/${seg.speed.toFixed(6)}`,
+        "-vf", `setpts=PTS/${seg.speed.toFixed(6)}${ffFilter}`,
         "-an",
         ...encArgs(outSize.w, outSize.h),
         "-r", String(fps),
@@ -396,7 +420,7 @@ export function segmentStage(
       ];
     }
   }
-  return { kind: "segment", label: `segment ${secs(seg.srcStartMs)}s @${seg.speed.toFixed(2)}x`, args, output: out };
+  return { kind: "segment", label: `segment ${secs(seg.srcStartMs)}s @${seg.speed.toFixed(2)}x${seg.speed > 1 ? " +ff" : ""}`, args, output: out };
 }
 
 export function concatListContent(inputs: string[]): string {
@@ -1076,7 +1100,7 @@ export function planExport(input: PlanInput): ExportPlan {
       const f = path.join(workDir, `seg_${i}.mp4`);
       segFiles.push(f);
       intermediates.push(f);
-      stages.push(segmentStage(pipelineInput, f, seg, fps, { w: srcW, h: srcH }));
+      stages.push(segmentStage(pipelineInput, f, seg, fps, { w: srcW, h: srcH }, buildFfLabel(settings.brandFontPath)));
     });
     const listFile = path.join(workDir, "concat.txt");
     intermediates.push(listFile, timeline);

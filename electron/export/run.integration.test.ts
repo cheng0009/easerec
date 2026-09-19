@@ -172,6 +172,24 @@ describe.runIf(hasFfmpeg)("export pipeline (real ffmpeg)", () => {
     expect(dur).toBeLessThan(12);
   }, 180000);
 
+  it("short F4 speedup passes through at 1x — film never gains time", async () => {
+    // 4s source with a 2s F4 range (min target 3s would stretch it into
+    // slow-motion): the exporter caps at the source length, so output stays 4s.
+    const input = path.join(dir, "ffshort.mp4");
+    const output = path.join(dir, "ffshort_out.mp4");
+    generateInput(input, 4);
+    let edl = appendEdit(emptyEdl(), speedup(1000, 3000));
+    const res = await runExportPipeline({
+      inputPath: input, outputPath: output, outDir: dir,
+      edl, durationMs: 4000, settings: baseSettings(),
+      llmConfig: { enabled: false, baseUrl: "", apiKey: "", model: "" },
+      ctx: ctx(),
+    });
+    expect(res).toContain("Saved to:");
+    expect(existsSync(output)).toBe(true);
+    expect(await probeDurationSecs(output)).toBeCloseTo(4, 0);
+  }, 120000);
+
   it("produces a vertical 9:16 derivative from the camera track", async () => {
     const input = path.join(dir, "vert.mp4");
     const output = path.join(dir, "vert_out.mp4");

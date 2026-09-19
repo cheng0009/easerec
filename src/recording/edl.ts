@@ -322,7 +322,11 @@ export function buildTimeline(edl: EdlFile, durationMs: number): TimelineSegment
     const srcLen = end - src;
     if (srcLen <= 0) continue;
     if (e.type === "speedup") {
-      const targetMs = clamp(srcLen / 1000, e.targetSecs[0], e.targetSecs[1]) * 1000;
+      // Target is clamped into [min,max] seconds, but NEVER longer than the
+      // source span: a short F4 range (e.g. 2s with min=3s) must not be
+      // stretched into slow motion — speed stays >= 1 and the film never
+      // grows beyond the recording.
+      const targetMs = Math.min(srcLen, clamp(srcLen / 1000, e.targetSecs[0], e.targetSecs[1]) * 1000);
       segments.push({ srcStartMs: src, srcEndMs: end, outStartMs: out, outEndMs: out + targetMs, speed: srcLen / targetMs, via: e });
       out += targetMs;
     } else {

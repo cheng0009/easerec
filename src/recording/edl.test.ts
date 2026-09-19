@@ -129,12 +129,15 @@ describe("buildTimeline", () => {
     expect(segs[2].outStartMs).toBeCloseTo(1000 + 5000, 4);
   });
 
-  it("expands a short speedup to the minimum target", () => {
+  it("never expands a short speedup (no slow-motion, film never gains time)", () => {
     const edl = appendEdit(emptyEdl(), { ...speedup(1000, 2500), targetSecs: [3, 5] }); // 1.5s source
     const segs = buildTimeline(edl, 5000);
     const sp = segs[1];
-    expect(sp.outEndMs - sp.outStartMs).toBeCloseTo(3000, 4);
-    expect(sp.speed).toBeCloseTo(0.5, 5);
+    // The 3s min target would EXCEED the 1.5s source — capped at the source so
+    // the span passes through at 1x instead of stretching into slow motion.
+    expect(sp.outEndMs - sp.outStartMs).toBeCloseTo(1500, 4);
+    expect(sp.speed).toBeCloseTo(1, 5);
+    expect(segs[segs.length - 1].outEndMs).toBeCloseTo(5000, 4);
   });
 
   it("handles rewind + fast-forward + mask together", () => {

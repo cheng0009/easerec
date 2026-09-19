@@ -357,7 +357,18 @@ export function closeOpenMarksOnStop(): void {
   if (st.marks.activePrivacyCut) {
     void dcInvoke("overlay_privacy_cut", { on: false }).catch(() => {});
   }
-  if (st.marks.activeFF) getDirector().recorder.setFFMode(false);
+  if (st.marks.activeFF) {
+    // Close an F4 range that was still open when the recording ended: mark
+    // the span up to the final moment instead of silently dropping the whole
+    // fast-forward (same rule as pause). The whoosh replaces the muted audio.
+    const start = st.marks.activeFF.startMs;
+    const end = nowMs();
+    if (end - start >= 500) {
+      const [lo, hi] = st.settings.ffTargetSecs;
+      void appendEdit({ type: "speedup", startMs: start, endMs: end, targetSecs: [lo, hi], audio: "whoosh" });
+    }
+    getDirector().recorder.setFFMode(false);
+  }
   st.setMarks({
     activePrivacy: null,
     activePrivacyCut: null,

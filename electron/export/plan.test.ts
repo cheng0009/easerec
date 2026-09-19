@@ -116,6 +116,28 @@ describe("planExport", () => {
     expect(plan.report.speedups).toBe(1);
   });
 
+  it("burns a centered '此处快进' label onto compressed (whoosh) segments", () => {
+    const edl = appendEdit(emptyEdl(), speedup(10000, 70000, "whoosh"));
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl, durationMs: 80000, settings: baseSettings(),
+    });
+    const seg1 = plan.stages[1];
+    expect(seg1.kind).toBe("segment");
+    const filter = seg1.args![seg1.args!.indexOf("-filter_complex") + 1];
+    expect(filter).toContain("drawtext=fontfile='C\\:/Windows/Fonts/msyh.ttc'");
+    expect(filter).toContain("此处快进");
+    expect(filter).toContain("x=(w-text_w)/2:y=(h-text_h)/2");
+    // No label when no CJK font is configured (must never break the graph).
+    const noFont = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl, durationMs: 80000, settings: { ...baseSettings(), brandFontPath: "" },
+    });
+    const f2 = noFont.stages[1].args![noFont.stages[1].args!.indexOf("-filter_complex") + 1];
+    expect(f2).not.toContain("drawtext=");
+    expect(f2).toContain("setpts=PTS/");
+  });
+
   it("mutes audio for mute speedups instead of the whoosh", () => {
     const edl = appendEdit(emptyEdl(), speedup(10000, 70000, "mute"));
     const plan = planExport({
