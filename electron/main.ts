@@ -294,6 +294,110 @@ let overlayPrivacyCutOn = false;
 let overlayPrivacyBoxRect: { x: number; y: number; w: number; h: number } | null = null;
 let overlayPrivacyHint = "";
 
+// Operator-HUD window state (persistent, replayed on window (re)creation).
+// The HUD shows ONLY instruction/status texts meant for the operator during
+// recording (FF banner, F6 box hint, "mask live" pill, privacy-cut pill). It
+// is EXCLUDED from capture, so none of it can leak into the film, while the
+// overlay window keeps the visuals that legitimately belong in the export.
+let hudFFOn = false;
+let hudPrivacyDrawOn = false;
+let hudPrivacyCutOn = false;
+let hudPrivacyBoxActive = false;
+let hudPrivacyHint = "";
+
+let hudWindow: BrowserWindow | null = null;
+let hudContents: Electron.WebContents | null = null;
+
+/** Push an event to the capture-excluded operator HUD window. */
+function pushHud(event: string, data: unknown): void {
+  if (hudContents && !hudContents.isDestroyed()) {
+    try {
+      hudContents.send("dc-event", { event, data });
+    } catch { console.warn(`[directorcam] hud send failed: ${event}`); }
+  } else {
+    console.warn("[directorcam] hud %s dropped (no live contents)", event);
+  }
+}
+
+/** Create (once) the full-screen, always-on-top, click-through operator HUD.
+ *  Excluded from screen capture (WDA_EXCLUDEFROMCAPTURE, same as the
+ *  prompter) so recording-time instructions never appear in the film. */
+function ensureHudWindow(): BrowserWindow | null {
+  if (hudWindow && !hudWindow.isDestroyed()) return hudWindow;
+  const disp = screen.getPrimaryDisplay();
+  const b = disp.bounds;
+  const win = new BrowserWindow({
+    x: b.x,
+    y: b.y,
+    width: b.width,
+    height: b.height,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+    focusable: false,
+    hasShadow: false,
+    alwaysOnTop: true,
+    show: false,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+    },
+  });
+  win.setAlwaysOnTop(true, "screen-saver");
+  win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // Pure HUD: never steal focus or mouse events (the privacy draw drag is
+  // handled by the overlay window below it).
+  win.setIgnoreMouseEvents(true, { forward: true });
+  win.on("close", () => { hudWindow = null; hudContents = null; });
+  win.webContents.on("render-process-gone", () => { try { win.destroy(); } catch { /* ignore */ } });
+  win.webContents.on("did-finish-load", () => {
+    hudContents = win.webContents;
+    // Replay state so a window created on demand reflects it instead of
+    // starting blank (mirrors the overlay replay).
+    pushHud("ov-ff", { on: hudFFOn });
+    pushHud("ov-privacy-draw", { on: hudPrivacyDrawOn, hint: hudPrivacyHint });
+    pushHud("ov-privacy-cut", { on: hudPrivacyCutOn });
+    pushHud("ov-privacy-box", { rect: hudPrivacyBoxActive ? {} : null });
+  });
+  hudWindow = win;
+  if (isDev) {
+    void win.loadURL(`${DEV_URL}/hud.html`);
+  } else {
+    void win.loadFile(path.join(projectPath("dist"), "hud.html"));
+  }
+  // Exclude from capture as soon as the OS window exists (getDisplayMedia /
+  // Windows Graphics Capture honors WDA_EXCLUDEFROMCAPTURE).
+  if (setWindowDisplayAffinity) {
+    try {
+      const handle = win.getNativeWindowHandle() as Buffer;
+      setWindowDisplayAffinity(handle.readUInt32LE(0), WDA_EXCLUDEFROMCAPTURE);
+    } catch (e) {
+      console.warn("[directorcam] hud capture exclusion failed", e);
+    }
+  }
+  return win;
+}
+
+function showHud(visible: boolean): void {
+  const win = ensureHudWindow();
+  if (!win) return;
+  try {
+    if (visible) {
+      win.showInactive();
+    } else if (win.isVisible()) {
+      win.hide();
+    }
+  } catch { /* ignore */ }
+}
+
 /** Create (once) the always-on-top, click-through, transparent desktop overlay. */
 function ensureOverlayWindow(): BrowserWindow | null {
   if (overlayWindow && !overlayWindow.isDestroyed()) return overlayWindow;
@@ -380,6 +484,13 @@ function resetOverlayPrivacyState(): void {
   pushOverlay("ov-privacy-draw", { on: false });
   pushOverlay("ov-privacy-cut", { on: false });
   pushOverlay("ov-privacy-box", { rect: null });
+  // Operator HUD mirrors the privacy state so stale pills never linger.
+  hudPrivacyDrawOn = false;
+  hudPrivacyCutOn = false;
+  hudPrivacyBoxActive = false;
+  pushHud("ov-privacy-draw", { on: false, hint: hudPrivacyHint });
+  pushHud("ov-privacy-cut", { on: false });
+  pushHud("ov-privacy-box", { rect: null });
 }
 
 // --- Floating teleprompter --------------------------------------------------
@@ -1212,18 +1323,30 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>, _event?:
     }
 
     // --- Overlay control for marks -------------------------------------------
+    // The overlay window draws the recorded ART (mosaic boxes, drag preview,
+    // effects); the capture-excluded HUD shows the OPERATOR-ONLY status pills
+    // and hints. State is mirrored to both (HUD = never recorded).
     case "overlay_ff":
       overlayFFOn = !!args.on;
       if (overlayFFOn) showOverlay(true);
       pushOverlay("ov-ff", { on: !!args.on });
+      hudFFOn = !!args.on;
+      if (hudFFOn) showHud(true);
+      pushHud("ov-ff", { on: !!args.on });
       return true;
     case "overlay_privacy_draw":
       overlayPrivacyDrawOn = !!args.on;
       overlayPrivacyHint = "拖拽框选需要遮挡的区域（F6 取消）";
       // Ensure the window exists and is visible BEFORE pushing — the very first
       // F6 press used to push into a not-yet-created overlay and drop the event.
-      if (overlayPrivacyDrawOn) showOverlay(true);
+      if (overlayPrivacyDrawOn) {
+        showOverlay(true);
+        showHud(true);
+      }
       pushOverlay("ov-privacy-draw", { on: overlayPrivacyDrawOn, hint: overlayPrivacyHint });
+      hudPrivacyDrawOn = overlayPrivacyDrawOn;
+      hudPrivacyHint = overlayPrivacyHint;
+      pushHud("ov-privacy-draw", { on: overlayPrivacyDrawOn, hint: overlayPrivacyHint });
       if (args.on) {
         overlayShield = true; // overlay swallows the mouse during the drag
         applyOverlayMouseMode();
@@ -1235,13 +1358,23 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>, _event?:
       return true;
     case "overlay_privacy_box":
       overlayPrivacyBoxRect = (args.rect as { x: number; y: number; w: number; h: number } | null) ?? null;
-      if (overlayPrivacyBoxRect) showOverlay(true);
+      if (overlayPrivacyBoxRect) {
+        showOverlay(true);
+        showHud(true);
+      }
       pushOverlay("ov-privacy-box", { rect: overlayPrivacyBoxRect });
+      hudPrivacyBoxActive = !!overlayPrivacyBoxRect;
+      pushHud("ov-privacy-box", { rect: overlayPrivacyBoxRect });
       return true;
     case "overlay_privacy_cut":
       overlayPrivacyCutOn = !!args.on;
-      if (overlayPrivacyCutOn) showOverlay(true);
+      if (overlayPrivacyCutOn) {
+        showOverlay(true);
+        showHud(true);
+      }
       pushOverlay("ov-privacy-cut", { on: overlayPrivacyCutOn });
+      hudPrivacyCutOn = overlayPrivacyCutOn;
+      pushHud("ov-privacy-cut", { on: overlayPrivacyCutOn });
       console.log(`[directorcam] privacy cut ${overlayPrivacyCutOn ? "ON" : "off"}`);
       return true;
     // From the OVERLAY window: a mask rectangle was dragged.
@@ -1251,6 +1384,8 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>, _event?:
       overlayShield = false;
       applyOverlayMouseMode();
       pushOverlay("ov-privacy-draw", { on: false });
+      hudPrivacyDrawOn = false;
+      pushHud("ov-privacy-draw", { on: false, hint: hudPrivacyHint });
       if (regionSelectWait) {
         // Region-recording selection in progress.
         const wait = regionSelectWait;
@@ -1330,11 +1465,15 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>, _event?:
 
     case "region_select_session": {
       showOverlay(true);
+      showHud(true);
       pushOverlay("ov-privacy-draw", {
         on: true,
         mode: "region",
         hint: "拖拽框选录制区域 — 松开即开始录制（ESC 取消）",
       });
+      hudPrivacyDrawOn = true;
+      hudPrivacyHint = "拖拽框选录制区域 — 松开即开始录制（ESC 取消）";
+      pushHud("ov-privacy-draw", { on: true, hint: hudPrivacyHint });
       overlayShield = true;
       applyOverlayMouseMode();
       return await new Promise((resolve) => {
@@ -1345,6 +1484,8 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>, _event?:
             overlayShield = false;
             applyOverlayMouseMode();
             pushOverlay("ov-privacy-draw", { on: false });
+            hudPrivacyDrawOn = false;
+            pushHud("ov-privacy-draw", { on: false, hint: hudPrivacyHint });
             resolve(null);
           }
         }, 120000);
@@ -1359,6 +1500,8 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>, _event?:
         overlayShield = false;
         applyOverlayMouseMode();
         pushOverlay("ov-privacy-draw", { on: false });
+        hudPrivacyDrawOn = false;
+        pushHud("ov-privacy-draw", { on: false, hint: hudPrivacyHint });
         wait(null);
       }
       return true;
@@ -1863,6 +2006,8 @@ function startCursorPolling(): void {
             overlayShield = false;
             applyOverlayMouseMode();
             pushOverlay("ov-privacy-draw", { on: false });
+            hudPrivacyDrawOn = false;
+            pushHud("ov-privacy-draw", { on: false, hint: hudPrivacyHint });
             wait(null);
           }
         }

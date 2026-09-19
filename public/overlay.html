@@ -130,16 +130,17 @@
       g.shadowBlur = 0;
     }
 
-    // --- Persistent mark visuals (FF banner / privacy boxes / draw mode). ---
+    // --- Persistent mark visuals (mosaic boxes / draw mode / effects). ---
     // These are overlay-resident (independent of the page's frame pushes) and
-    // ARE captured into the recording, by design.
+    // ARE captured into the recording, by design. Operator-ONLY instructions
+    // (FF banner, F6 box hint, "mask live" pill, privacy-cut banner) live in
+    // the separate capture-excluded HUD window (hud.html) instead — nothing
+    // meant for the person recording may leak into the film.
     let ff = { on: false };
     let privacyBoxes = [];   // normalized rects {x,y,w,h}
     let privacyBoxStartMs = 0; // wall-clock when the current mask box appeared (drives the HUD timer)
     let drawState = { on: false, mode: "privacy", dragging: false, x0: 0, y0: 0, x1: 0, y1: 0 };
-    let drawHint = "";
     let privacyCut = { on: false };
-    let privacyCutStartMs = 0; // wall-clock when the privacy-cut range opened (drives the HUD timer)
 
     // Reusable off-screen canvas for the lens pixels.
     let lensCanvas = null;
@@ -449,97 +450,8 @@
         g.strokeRect(bx + 1, by + 1, bw - 2, bh - 2);
       }
 
-      // Persistent "mask is live" HUD pill: the mosaic block itself is the
-      // primary cue, but a top banner makes the ACTIVE state unmistakable so
-      // the user always knows a second F6 ends it. Deliberately recorded —
-      // it reads as "this part is redacted", not as a UI glitch.
-      if (privacyBoxes.length > 0 && privacyBoxStartMs > 0) {
-        const secs = Math.max(0, (Date.now() - privacyBoxStartMs) / 1000);
-        const m = Math.floor(secs / 60);
-        const s = Math.floor(secs % 60);
-        const label = "\uD83D\uDEE1\uFE0F \u906E\u6321\u4E2D " + m + ":" + String(s).padStart(2, "0") + " \u00B7 F6 \u7ED3\u675F";
-        g.font = "bold " + Math.round(Math.max(15, W * 0.015)) + "px system-ui, sans-serif";
-        const tw = g.measureText(label).width;
-        const pad = 12;
-        const pillW = tw + pad * 2;
-        const pillH = Math.max(28, W * 0.022);
-        const px = W / 2 - pillW / 2;
-        const py = Math.round(H * 0.03);
-        g.fillStyle = "rgba(12,14,20,0.82)";
-        g.beginPath();
-        if (g.roundRect) g.roundRect(px, py, pillW, pillH, 8); else g.rect(px, py, pillW, pillH);
-        g.fill();
-        g.strokeStyle = "rgba(240,190,40,0.85)";
-        g.lineWidth = 1.5;
-        g.stroke();
-        g.fillStyle = "#ffd44d";
-        g.textAlign = "center";
-        g.textBaseline = "middle";
-        g.fillText(label, px + pillW / 2, py + pillH / 2 + 1);
-      }
-
-      // Fast-forward visuals: 30% black veil + corner badge + center hint.
-      // Intended to be recorded so the exported clip keeps the cue.
-      if (ff.on) {
-        g.fillStyle = "rgba(0,0,0,0.30)";
-        g.fillRect(0, 0, W, H);
-
-        const label = "\u23E9 \u5FEB\u8FDB\u4E2D";
-        g.font = "bold " + Math.round(Math.max(18, W * 0.02)) + "px system-ui, sans-serif";
-        const tw = g.measureText(label).width;
-        const pad = 14;
-        const bw = tw + pad * 2;
-        const bh = Math.max(34, W * 0.032);
-        const bx = W - bw - Math.round(W * 0.03);
-        const by = Math.round(H * 0.05);
-        g.fillStyle = "rgba(10,12,18,0.78)";
-        g.beginPath();
-        if (g.roundRect) g.roundRect(bx, by, bw, bh, 8); else g.rect(bx, by, bw, bh);
-        g.fill();
-        g.strokeStyle = "rgba(255,255,255,0.5)";
-        g.lineWidth = 2;
-        g.stroke();
-        g.fillStyle = "#ffffff";
-        g.textAlign = "center";
-        g.textBaseline = "middle";
-        g.fillText(label, bx + bw / 2, by + bh / 2 + 1);
-
-        g.font = "bold " + Math.round(Math.max(26, W * 0.028)) + "px system-ui, sans-serif";
-        g.fillStyle = "rgba(255,255,255,0.92)";
-        g.shadowColor = "rgba(0,0,0,0.6)";
-        g.shadowBlur = 12;
-        g.fillText("\u89C6\u9891\u5FEB\u8FDB\u4E2D...", W / 2, H * 0.12);
-        g.shadowBlur = 0;
-      }
-
-      // Privacy whole-cut (Shift+F6): red top banner while a cut range is open.
-      // The range is removed at export, so the banner is never in the film.
-      if (privacyCut.on) {
-        const secs = Math.max(0, (Date.now() - privacyCutStartMs) / 1000);
-        const m = Math.floor(secs / 60);
-        const s = Math.floor(secs % 60);
-        const label = "\uD83D\uDEE1\uFE0F \u9690\u79C1\u526A\u8F91\u4E2D " + m + ":" + String(s).padStart(2, "0") + " \u00B7 SHIFT+F6 \u7ED3\u675F";
-        g.font = "bold " + Math.round(Math.max(15, W * 0.015)) + "px system-ui, sans-serif";
-        const tw = g.measureText(label).width;
-        const pad = 12;
-        const pillW = tw + pad * 2;
-        const pillH = Math.max(28, W * 0.022);
-        const px = W / 2 - pillW / 2;
-        const py = Math.round(H * 0.03);
-        g.fillStyle = "rgba(24,10,12,0.85)";
-        g.beginPath();
-        if (g.roundRect) g.roundRect(px, py, pillW, pillH, 8); else g.rect(px, py, pillW, pillH);
-        g.fill();
-        g.strokeStyle = "rgba(230,60,60,0.9)";
-        g.lineWidth = 1.5;
-        g.stroke();
-        g.fillStyle = "#ff8a7a";
-        g.textAlign = "center";
-        g.textBaseline = "middle";
-        g.fillText(label, px + pillW / 2, py + pillH / 2 + 1);
-      }
-
-      // Privacy draw mode: veil + hint + current drag rectangle.
+      // Privacy draw mode: veil + current drag rectangle. The instruction text
+      // shown to the operator lives in the capture-excluded HUD window.
       if (drawState.on) {
         g.fillStyle = "rgba(0,0,20,0.18)";
         g.fillRect(0, 0, W, H);
@@ -555,16 +467,6 @@
         g.setLineDash([]);
         // NOTE: no fill here — the drag preview must not be captured as a
         // black box before the mark is confirmed.
-
-        g.font = "bold " + Math.round(Math.max(22, W * 0.022)) + "px system-ui, sans-serif";
-        g.textAlign = "center";
-        g.textBaseline = "middle";
-        g.fillStyle = "rgba(255,255,255,0.95)";
-        g.shadowColor = "rgba(0,0,0,0.7)";
-        g.shadowBlur = 10;
-        // Session-specific hint (privacy mask vs region recording) pushed by main.
-        g.fillText(drawHint || "\u62D6\u62FD\u6846\u9009\u9700\u8981\u906E\u6321\u7684\u533A\u57DF\uFF08F6 \u53D6\u6D88\uFF09", W / 2, Math.max(40, H * 0.06));
-        g.shadowBlur = 0;
       }
     }
 
@@ -665,7 +567,6 @@
       api.on("ov-privacy-draw", (p) => {
         try {
           const on = !!(p && p.on);
-          drawHint = (p && typeof p.hint === "string") ? p.hint : "";
           drawState = { on, mode: (p && p.mode === "region") ? "region" : "privacy", dragging: false, x0: 0, y0: 0, x1: 0, y1: 0 };
           // The overlay must swallow the mouse while the user drags the box.
           try { api.send("dc-overlay-shield", on); } catch {}
@@ -684,7 +585,6 @@
       api.on("ov-privacy-cut", (p) => {
         try {
           const on = !!(p && p.on);
-          if (on && !privacyCut.on) privacyCutStartMs = Date.now();
           privacyCut.on = on;
           if (on) ensurePersistentLoop();
           draw();

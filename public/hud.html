@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <style>
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: transparent; user-select: none; }
+    .pill {
+      position: absolute;
+      top: 3%;
+      left: 50%;
+      transform: translateX(-50%);
+      display: none;
+      align-items: center;
+      padding: 7px 16px;
+      border-radius: 8px;
+      background: rgba(12, 14, 20, 0.82);
+      color: #ffd44d;
+      font-family: system-ui, "Microsoft YaHei", sans-serif;
+      font-weight: 700;
+      text-align: center;
+      white-space: nowrap;
+      z-index: 10;
+    }
+    .pill[data-on="1"] { display: inline-flex; }
+    .pill.mask { border: 1.5px solid rgba(240, 190, 40, 0.85); }
+    .pill.ff { border: 1.5px solid rgba(90, 162, 255, 0.9); color: #8fc0ff; }
+    .pill.cut { border: 1.5px solid rgba(230, 60, 60, 0.9); color: #ff8a7a; }
+    .pill.hint {
+      top: 6%;
+      background: transparent;
+      border: none;
+      color: rgba(255, 255, 255, 0.95);
+      text-shadow: 0 1px 6px rgba(0, 0, 0, 0.75);
+      font-size: 24px;
+    }
+  </style>
+</head>
+<body>
+  <!-- Operator-only status HUD. This window is EXCLUDED from screen capture
+       (WDA_EXCLUDEFROMCAPTURE), so these pills exist purely for the person
+       recording — recording-time instructions never reach the finished film.
+       The overlay window (which IS captured) only draws the art that
+       legitimately belongs in the export. -->
+  <div class="pill mask" id="pill-mask">🛡 遮挡中 0:00 · F6 结束</div>
+  <div class="pill ff" id="pill-ff">⏩ 快进中 0:00 · F4 结束</div>
+  <div class="pill cut" id="pill-cut">🛡 隐私剪辑中 0:00 · SHIFT+F6 结束</div>
+  <div class="pill hint" id="pill-hint">拖拽框选需要遮挡的区域（F6 取消）</div>
+  <script>
+    // Mirrors the overlay window's state (ov-* events pushed by main) but only
+    // renders the operator-facing text. A mm:ss elapsed timer runs per pill.
+    const api = window.__directorcam;
+    const mask = document.getElementById("pill-mask");
+    const ff = document.getElementById("pill-ff");
+    const cut = document.getElementById("pill-cut");
+    const hint = document.getElementById("pill-hint");
+
+    function fontPx() {
+      const base = Math.max(15, window.innerWidth * 0.015);
+      return Math.round(base) + "px";
+    }
+    function hintPx() {
+      return Math.round(Math.max(22, window.innerWidth * 0.022)) + "px";
+    }
+    function applyFont() {
+      for (const el of [mask, ff, cut]) el.style.fontSize = fontPx();
+      hint.style.fontSize = hintPx();
+      hint.style.top = Math.max(40, window.innerHeight * 0.06) + "px";
+    }
+    window.addEventListener("resize", applyFont);
+    applyFont();
+
+    const state = { mask: false, ff: false, cut: false, starts: {} };
+    function setOn(el, key, on) {
+      state[key] = !!on;
+      if (on && !state.starts[key]) state.starts[key] = Date.now();
+      if (!on) { state.starts[key] = 0; }
+      el.setAttribute("data-on", state[key] ? "1" : "0");
+    }
+    function fmt(ms) {
+      const s = Math.max(0, Math.floor(ms / 1000));
+      return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+    }
+    function tick() {
+      const now = Date.now();
+      mask.textContent = "🛡 遮挡中 " + fmt(now - state.starts.mask) + " · F6 结束";
+      ff.textContent = "⏩ 快进中 " + fmt(now - state.starts.ff) + " · F4 结束";
+      cut.textContent = "🛡 隐私剪辑中 " + fmt(now - state.starts.cut) + " · SHIFT+F6 结束";
+    }
+    setInterval(tick, 250);
+    tick();
+
+    if (api && typeof api.on === "function") {
+      api.on("ov-ff", (p) => setOn(ff, "ff", p && p.on));
+      api.on("ov-privacy-draw", (p) => {
+        setOn(hint, "draw", p && p.on);
+        if (p && typeof p.hint === "string") hint.textContent = p.hint;
+      });
+      api.on("ov-privacy-cut", (p) => setOn(cut, "cut", p && p.on));
+      api.on("ov-privacy-box", (p) => setOn(mask, "mask", !!(p && p.rect)));
+    }
+  </script>
+</body>
+</html>
