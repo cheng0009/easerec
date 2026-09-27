@@ -102,6 +102,8 @@ export function ExportDrawer() {
           brand_lang: useStore.getState().current === "en" ? "en" : "zh",
           voice_enhance: settings.voiceEnhance,
           voice_enhance_strength: settings.voiceEnhanceStrength,
+          voice_timbre: settings.voiceTimbre,
+          voice_reverb: settings.voiceReverb,
           bgm_path: settings.bgmPath,
           bgm_volume: settings.bgmVolume,
           loudnorm: settings.loudnorm,
@@ -248,6 +250,26 @@ export function ExportDrawer() {
               <option value="light">{L("轻度 — 保留现场感", "Light — keep room feel")}</option>
               <option value="standard">{L("标准 — 推荐", "Standard — recommended")}</option>
               <option value="strong">{L("强劲 — 嘈杂环境", "Strong — noisy rooms")}</option>
+            </select>
+          </Row>
+        )}
+        {settings.voiceEnhance && (
+          <Row label={L("音色风格", "Timbre")}>
+            <select value={settings.voiceTimbre} style={inp}
+              onChange={(e) => setSettings({ voiceTimbre: e.target.value as "none" | "magnetic" | "bright" })}>
+              <option value="none">{L("原声 — 不染色", "Natural — no coloration")}</option>
+              <option value="magnetic">{L("磁性 — 男声低沉厚实", "Magnetic — deep & thick (male)")}</option>
+              <option value="bright">{L("清亮 — 女声通透有空气感", "Bright — crisp & airy (female)")}</option>
+            </select>
+          </Row>
+        )}
+        {settings.voiceEnhance && (
+          <Row label={L("空间混响", "Reverb")}>
+            <select value={settings.voiceReverb} style={inp}
+              onChange={(e) => setSettings({ voiceReverb: e.target.value as "none" | "light" | "studio" })}>
+              <option value="none">{L("无 — 干声", "None — dry")}</option>
+              <option value="light">{L("轻微 — 一点房间感", "Light — hint of room")}</option>
+              <option value="studio">{L("录音棚 — 广播棚感", "Studio — broadcast room")}</option>
             </select>
           </Row>
         )}

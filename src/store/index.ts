@@ -97,6 +97,8 @@ export const useStore = create<AppStore>((set) => ({
       loudnorm: false,
       voiceEnhance: true,
       voiceEnhanceStrength: "standard",
+      voiceTimbre: "none",
+      voiceReverb: "none",
       bgmPath: "",
       bgmVolume: "medium",
       verticalExport: false,

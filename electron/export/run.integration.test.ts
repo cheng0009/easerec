@@ -212,6 +212,44 @@ describe.runIf(hasFfmpeg)("export pipeline (real ffmpeg)", () => {
     expect(await probeDurationSecs(output)).toBeCloseTo(4, 0);
   }, 120000);
 
+  it("voice timbre + studio reverb (parallel wet graph) exports cleanly", async () => {
+    // Exercises the asplit dry/wet filter_complex path WITHOUT bgm — the graph
+    // shape only the reverb gears produce, incl. stereowiden on the wet branch.
+    const input = path.join(dir, "voice_studio.mp4");
+    const output = path.join(dir, "voice_studio_out.mp4");
+    generateInput(input, 4);
+    const res = await runExportPipeline({
+      inputPath: input, outputPath: output, outDir: dir,
+      edl: emptyEdl(), durationMs: 4000,
+      settings: { ...baseSettings(), voiceEnhance: true, voiceEnhanceStrength: "standard", voiceTimbre: "magnetic", voiceReverb: "studio", loudnorm: true },
+      llmConfig: { enabled: false, baseUrl: "", apiKey: "", model: "" },
+      ctx: ctx(),
+    });
+    expect(res).toContain("Saved to:");
+    expect(existsSync(output)).toBe(true);
+    expect(await probeDurationSecs(output)).toBeCloseTo(4, 0);
+  }, 120000);
+
+  it("bright timbre + light reverb + BGM compose into one graph", async () => {
+    // The full composite: cleanup + timbre + reverb wet path + BGM amix — the
+    // exact graph real user exports build when every audio gear is engaged.
+    const input = path.join(dir, "voice_bgm.mp4");
+    const output = path.join(dir, "voice_bgm_out.mp4");
+    const bgm = path.join(dir, "bgm.wav");
+    generateInput(input, 4);
+    execFileSync(FFMPEG, ["-y", "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=2", "-c:a", "pcm_s16le", bgm], { stdio: "ignore", timeout: 60000 });
+    const res = await runExportPipeline({
+      inputPath: input, outputPath: output, outDir: dir,
+      edl: emptyEdl(), durationMs: 4000,
+      settings: { ...baseSettings(), voiceEnhance: true, voiceEnhanceStrength: "light", voiceTimbre: "bright", voiceReverb: "light", bgmPath: bgm, bgmVolume: "low" },
+      llmConfig: { enabled: false, baseUrl: "", apiKey: "", model: "" },
+      ctx: ctx(),
+    });
+    expect(res).toContain("Saved to:");
+    expect(existsSync(output)).toBe(true);
+    expect(await probeDurationSecs(output)).toBeCloseTo(4, 0);
+  }, 120000);
+
   it("produces a vertical 9:16 derivative from the camera track", async () => {
     const input = path.join(dir, "vert.mp4");
     const output = path.join(dir, "vert_out.mp4");

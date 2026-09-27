@@ -55,6 +55,10 @@ export interface ExportSettings {
   voiceEnhance?: boolean;
   /** Voice beautification intensity ("light" | "standard" | "strong"). */
   voiceEnhanceStrength?: string;
+  /** Voice timbre style on top of the cleanup chain ("none" | "magnetic" | "bright"). */
+  voiceTimbre?: string;
+  /** Room reverb on the voice ("none" | "light" | "studio"). */
+  voiceReverb?: string;
   /** Background music mixed (looped) under the voice. */
   bgmPath?: string;
   /** Background music level ("low" | "medium" | "high"). */
@@ -446,12 +450,59 @@ export function voiceEnhanceChain(strength: string | undefined): string[] {
   return ["highpass=f=75", "afftdn=nr=12:nf=-25", "acompressor=threshold=0.05:ratio=2.2:attack=20:release=220:makeup=1.8"];
 }
 
+/** Timbre style on top of the cleanup chain. "magnetic" thickens/warms a male
+ *  voice (low shelf + a touch of harmonic saturation); "bright" lifts presence
+ *  and air for a crisp female/young voice, de-essed so it never turns harsh.
+ *  This POLISHES the voice — no pitch shifting, no gender change. */
+export function timbreChain(timbre: string | undefined): string[] {
+  if (timbre === "magnetic") {
+    return [
+      "bass=g=3:f=130", // chest warmth shelf
+      "equalizer=f=280:w=1.2:g=-2", // clear low-mid mud so warmth stays clean
+      "equalizer=f=2400:w=1.5:g=1.5", // keep consonants defined
+      "aexciter=amount=2.2:drive=6:freq=5500", // subtle harmonics = richness/grain
+    ];
+  }
+  if (timbre === "bright") {
+    return [
+      "equalizer=f=300:w=1.2:g=-1.5", // unbox the voice
+      "equalizer=f=3300:w=1.5:g=2", // consonant presence
+      "treble=g=2:f=5000", // air shelf
+      "deesser=i=0.35:m=0.4:f=0.28", // tame sibilance (~6.7 kHz at 48 kHz)
+    ];
+  }
+  return [];
+}
+
+/** Wet branch of the room reverb (returns null when off). Runs PARALLEL to a
+ *  pristine dry path: only the wet taps get echo + HF damping, then mix back
+ *  conservatively — speech polish, not a vocals-on-a-track wash. */
+export function reverbWetChain(reverb: string | undefined): string | null {
+  if (reverb === "light") {
+    // small room: two short taps, gently damped
+    return "aecho=0.6:0.75:34|57:0.24|0.18,lowpass=f=8000,volume=0.55";
+  }
+  if (reverb === "studio") {
+    // studio/plate: denser multi-tap tail, darker, slightly widened
+    return (
+      "aecho=0.55:0.8:28|46|71|103:0.22|0.18|0.14|0.10," +
+      "lowpass=f=6500," +
+      "aformat=sample_fmts=fltp:channel_layouts=stereo," +
+      "stereowiden=delay=15:feedback=0.2:crossfeed=0.3:drymix=0.8," +
+      "volume=0.6"
+    );
+  }
+  return null;
+}
+
 export function audioPassStage(
   input: string,
   out: string,
   opts: {
     loudnorm: boolean;
     voiceEnhance?: string | false;
+    timbre?: string;
+    reverb?: string;
     bgm?: string | null;
     bgmVolume?: string;
     fps: number;
@@ -459,27 +510,51 @@ export function audioPassStage(
     h?: number;
   },
 ): StageBase {
-  const voice: string[] = [];
-  if (opts.voiceEnhance) voice.push(...voiceEnhanceChain(String(opts.voiceEnhance)));
-  if (opts.loudnorm) voice.push("loudnorm=I=-16:TP=-1.5:LRA=11");
+  const pre: string[] = [];
+  if (opts.voiceEnhance) pre.push(...voiceEnhanceChain(String(opts.voiceEnhance)));
+  if (opts.timbre) pre.push(...timbreChain(opts.timbre));
+  const wet = reverbWetChain(opts.reverb);
+  const tail = opts.loudnorm ? ["loudnorm=I=-16:TP=-1.5:LRA=11"] : [];
 
-  const parts = [...voice, opts.bgm ? "bgm" : ""].filter(Boolean);
+  const parts = [
+    opts.voiceEnhance ? "clean" : "",
+    opts.timbre && timbreChain(opts.timbre).length ? opts.timbre : "",
+    wet ? `reverb:${opts.reverb}` : "",
+    ...tail,
+    opts.bgm ? "bgm" : "",
+  ].filter(Boolean);
   const label = `audio pass (${parts.join(" + ") || "passthrough"})`;
   const args: string[] = ["-y", "-i", input];
 
+  // Voice graph producing [va]. Reverb needs a parallel wet branch (dry stays
+  // untouched at −0.45 dB headroom so dry+wet cannot clip); without reverb the
+  // plain serial chain is kept — including the historic bare -af path when no
+  // graph input exists at all (tests pin those args).
+  const voiceSerial = [...pre, ...tail];
+  const vaGraph = wet
+    ? `[0:a]${[...pre, "asplit=2"].join(",")}[dc][wc];` +
+      `[wc]${wet}[wo];` +
+      `[dc]volume=0.95[dd];` +
+      `[dd][wo]amix=inputs=2:duration=first:normalize=0${tail.length ? "," + tail.join(",") : ""}[va]`
+    : voiceSerial.length
+      ? `[0:a]${voiceSerial.join(",")}[va]`
+      : "";
+
   if (opts.bgm) {
-    // Voice chain first, then the music (infinitely looped via -stream_loop,
+    // Voice graph first, then the music (infinitely looped via -stream_loop,
     // capped by the voice track via duration=first) mixed UNDER it at the
     // configured level — normalize=0 keeps amix from halving both levels.
     const level = opts.bgmVolume === "low" ? "0.10" : opts.bgmVolume === "high" ? "0.35" : "0.20";
     args.push("-stream_loop", "-1", "-i", opts.bgm);
     const fc =
-      `[0:a]${voice.join(",") || "anull"}[va];` +
+      `${vaGraph || "[0:a]anull[va]"};` +
       `[1:a]volume=${level}[m];` +
       `[va][m]amix=inputs=2:duration=first:normalize=0[aout]`;
     args.push("-filter_complex", fc, "-map", "0:v:0", "-map", "[aout]");
-  } else {
-    if (voice.length) args.push("-af", voice.join(","));
+  } else if (wet) {
+    args.push("-filter_complex", vaGraph, "-map", "0:v:0", "-map", "[va]");
+  } else if (voiceSerial.length) {
+    args.push("-af", voiceSerial.join(","));
   }
   args.push(...encArgs(opts.w ?? 1920, opts.h ?? 1080), "-r", String(opts.fps), "-movflags", "+faststart", out);
   return { kind: "audio", label, args, output: out };
@@ -1095,7 +1170,9 @@ export function planExport(input: PlanInput): ExportPlan {
   // re-encode on top of the mask burn.
   const needsSegments = edl.edits.some((e) => e.type === "cut" || e.type === "speedup");
   const hasAudio = input.hasAudio !== false;
-  const needsAudioPass = (settings.loudnorm || !!settings.voiceEnhance || !!settings.bgmPath) && hasAudio;
+  const needsAudioPass = (settings.loudnorm || !!settings.voiceEnhance || !!settings.bgmPath ||
+    (settings.voiceTimbre ? settings.voiceTimbre !== "none" : false) ||
+    (settings.voiceReverb ? settings.voiceReverb !== "none" : false)) && hasAudio;
   const needsBurn = settings.subtitles && hasAudio;
   const brandOn = settings.brandOutro;
   const needsFinalConcat = (settings.introEnabled && !!settings.introPath) || (settings.outroEnabled && !!settings.outroPath) || brandOn;
@@ -1132,6 +1209,8 @@ export function planExport(input: PlanInput): ExportPlan {
     stages.push(audioPassStage(current, av, {
       loudnorm: settings.loudnorm,
       voiceEnhance: settings.voiceEnhance ? (settings.voiceEnhanceStrength || "standard") : false,
+      timbre: settings.voiceTimbre && settings.voiceTimbre !== "none" ? settings.voiceTimbre : undefined,
+      reverb: settings.voiceReverb && settings.voiceReverb !== "none" ? settings.voiceReverb : undefined,
       bgm: settings.bgmPath || null,
       bgmVolume: settings.bgmVolume,
       fps,

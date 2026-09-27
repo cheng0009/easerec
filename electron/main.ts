@@ -1664,6 +1664,10 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
     loudnorm: config.loudnorm === true,
     voiceEnhance: config.voice_enhance === true,
     voiceEnhanceStrength: String(config.voice_enhance_strength || "standard"),
+    // Timbre/reverb are sub-gears of the voice-beautify master toggle: zero
+    // them when it is off so a stale persisted style never leaks into export.
+    voiceTimbre: config.voice_enhance === true ? String(config.voice_timbre || "none") : "none",
+    voiceReverb: config.voice_enhance === true ? String(config.voice_reverb || "none") : "none",
     bgmPath: String(config.bgm_path || ""),
     bgmVolume: String(config.bgm_volume || "medium"),
     subtitles: config.burn_subtitles === true,

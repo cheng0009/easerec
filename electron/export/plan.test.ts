@@ -196,6 +196,81 @@ describe("planExport", () => {
     expect(kindsOf(plan.stages)).toEqual(["audio", "transcode", "asr", "burn", "transcode"]);
   });
 
+  it("chains a timbre style into the serial -af chain (no reverb)", () => {
+    const settings = { ...baseSettings(), voiceEnhance: true, voiceEnhanceStrength: "standard", voiceTimbre: "magnetic" };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings,
+    });
+    const audioArgs = plan.stages[0].args!;
+    const af = audioArgs[audioArgs.indexOf("-af") + 1];
+    // cleanup first, timbre second — EQ on denoised/compressed audio
+    expect(af.indexOf("acompressor")).toBeLessThan(af.indexOf("bass=g=3:f=130"));
+    expect(af).toContain("aexciter=amount=2.2:drive=6:freq=5500");
+    expect(af).not.toContain("deesser");
+  });
+
+  it("bright timbre de-esses after the presence boost", () => {
+    const settings = { ...baseSettings(), voiceEnhance: true, voiceEnhanceStrength: "light", voiceTimbre: "bright" };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings,
+    });
+    const af = plan.stages[0].args![plan.stages[0].args!.indexOf("-af") + 1];
+    expect(af).toContain("treble=g=2:f=5000");
+    expect(af.indexOf("treble")).toBeLessThan(af.indexOf("deesser"));
+  });
+
+  it("reverb builds a parallel wet graph: dry pristine, loudnorm after the mix", () => {
+    const settings = { ...baseSettings(), loudnorm: true, voiceReverb: "studio" };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings,
+    });
+    const audioArgs = plan.stages[0].args!;
+    expect(audioArgs).not.toContain("-af");
+    const fc = audioArgs[audioArgs.indexOf("-filter_complex") + 1];
+    expect(fc).toContain("asplit=2[dc][wc]");
+    expect(fc).toContain("aecho=0.55:0.8:28|46|71|103:0.22|0.18|0.14|0.10");
+    // stereowiden option names pinned — a wrong guess ("cross"/"dry") only
+    // explodes at export time on the user's machine
+    expect(fc).toContain("stereowiden=delay=15:feedback=0.2:crossfeed=0.3:drymix=0.8");
+    expect(fc).toContain("[dc]volume=0.95[dd]");
+    // wet is damped and scaled before it rejoins the dry path
+    expect(fc.indexOf("lowpass=f=6500")).toBeLessThan(fc.indexOf("[dd][wo]amix"));
+    // loudness normalization is the LAST voice step
+    expect(fc.indexOf("amix=inputs=2:duration=first:normalize=0,loudnorm")).toBeGreaterThan(0);
+    expect(audioArgs[audioArgs.indexOf("-map", audioArgs.indexOf("-map") + 1) + 1]).toBe("[va]");
+  });
+
+  it("reverb composes with the bgm mix (two amix nodes, music under the voice)", () => {
+    const settings = { ...baseSettings(), voiceEnhance: true, voiceTimbre: "magnetic", voiceReverb: "light", bgmPath: "C:/m/bgm.mp3", bgmVolume: "low" };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings,
+    });
+    const audioArgs = plan.stages[0].args!;
+    expect(audioArgs).toContain("-stream_loop");
+    const fc = audioArgs[audioArgs.indexOf("-filter_complex") + 1];
+    // timbre rides the dry+wet pre-mix; bgm joins afterwards at its own level
+    expect(fc.indexOf("bass=g=3:f=130")).toBeLessThan(fc.indexOf("asplit=2"));
+    expect(fc).toContain("[1:a]volume=0.10[m]");
+    expect(fc).toContain("[va][m]amix=inputs=2:duration=first:normalize=0[aout]");
+    expect((fc.match(/amix=inputs=2/g) || []).length).toBe(2);
+  });
+
+  it("schedules the audio pass for a timbre/reverb even without the cleanup chain", () => {
+    const settings = { ...baseSettings(), voiceTimbre: "bright", voiceReverb: "light" };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings,
+    });
+    expect(kindsOf(plan.stages)[0]).toBe("audio");
+    const fc = plan.stages[0].args![plan.stages[0].args!.indexOf("-filter_complex") + 1];
+    expect(fc).not.toContain("afftdn"); // cleanup off: only timbre + reverb run
+    expect(fc).toContain("deesser");
+  });
+
   it("burn uses a relative ass path with cwd (Windows colon-safe)", () => {
     const st = burnStage("C:\\tmp\\subbed.mp4", "C:\\tmp\\out.mp4", "C:\\tmp\\work\\subs.ass", 30);
     const vf = st.args![st.args!.indexOf("-vf") + 1];

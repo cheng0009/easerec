@@ -114,6 +114,10 @@ export interface SettingsState {
   voiceEnhance: boolean;
   /** Voice beautification intensity ("light" | "standard" | "strong"). */
   voiceEnhanceStrength: "light" | "standard" | "strong";
+  /** Voice timbre style on export — polish, not pitch change. */
+  voiceTimbre: "none" | "magnetic" | "bright";
+  /** Room reverb on the voice on export. */
+  voiceReverb: "none" | "light" | "studio";
   /** Background music file mixed (looped) under the voice on export. */
   bgmPath: string;
   /** Background music level ("low" | "medium" | "high"). */
