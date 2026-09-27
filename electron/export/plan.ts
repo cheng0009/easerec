@@ -8,14 +8,17 @@
  * changes time happens before the ASR step):
  *   1. segments      — EDL cuts removed, speedups compressed  -> seg_*.mp4
  *   2. concat        — stream-copy the segments               -> timeline.mp4
- *   3. audio pass    — silence trim + loudnorm (re-encode)    -> av.mp4
+ *   3. audio pass    — voice chain + loudnorm (video copied)  -> av.mp4
  *   4. ASR           — wav extract + whisper + optional LLM   -> subs.ass
  *   5. subtitle burn — -vf ass (re-encode)                    -> subbed.mp4
- *   6. final concat  — intro + main + outro (re-encode)       -> main.mp4
+ *   6. final concat  — intro + main + outro (copy when safe)  -> main.mp4
  *   7. finalize      — copy/move the main line to the output  -> output.mp4
  *   8. vertical      — camera-track sendcmd crop 9:16         -> output_vertical.mp4
- * Stages whose feature is disabled are omitted; with everything disabled the
- * planner emits a single legacy transcode stage.
+ * The audio pass never re-encodes video, and the final concat splices via
+ * stream copy (plan.copyConcat) whenever the main line was encoded by this
+ * pipeline and its audio is aac — a film is re-encoded only where a filter
+ * actually changes its pixels. Stages whose feature is disabled are omitted;
+ * with everything disabled the planner emits a single legacy transcode stage.
  */
 
 import path from "node:path";
@@ -103,6 +106,9 @@ export interface StageBase {
   /** final-concat: parallel to `inputs`; still-image parts need an explicit
    *  hold duration (seconds) since they have no video duration to inherit. */
   partDurations?: number[];
+  /** final-concat: the main-timeline part inside `inputs` — the only part the
+   *  runner must NOT re-encode when it splices via stream copy. */
+  mainPart?: string;
   /** vertical stage plumbing, filled at plan time, executed by the runner. */
   sendcmdFile?: string;
   camTrackPath?: string;
@@ -117,6 +123,12 @@ export interface StageBase {
 export interface ExportPlan {
   stages: StageBase[];
   intermediates: string[];
+  /** True when the runner may splice the final concat with STREAM COPY:
+   *  the main line's video was (re-)encoded inside this pipeline with our own
+   *  encoder settings, and its audio is aac (or absent) — so short parts
+   *  normalized to the same parameters can be concatenated without another
+   *  full-length encode of the film. False keeps the re-encoding filter path. */
+  copyConcat: boolean;
   /** Pixel size of the planned main output (crop size in region recording). */
   outputSize: { w: number; h: number };
   report: {
@@ -556,7 +568,14 @@ export function audioPassStage(
   } else if (voiceSerial.length) {
     args.push("-af", voiceSerial.join(","));
   }
-  args.push(...encArgs(opts.w ?? 1920, opts.h ?? 1080), "-r", String(opts.fps), "-movflags", "+faststart", out);
+  // This stage only ever transforms AUDIO: the video packets are demuxed and
+  // remuxed untouched (-c:v copy). Re-encoding the picture here cost a full
+  // encode per export while changing nothing — later stages that need uniform
+  // video params (subtitle burn, vertical) re-encode anyway, and when nothing
+  // follows, the finalize copy keeps the upstream stream as-is. No -r either:
+  // frame timing cannot be resampled on a copied stream, and no consumer of
+  // this file needs it.
+  args.push("-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2", out);
   return { kind: "audio", label, args, output: out };
 }
 
@@ -970,6 +989,10 @@ export interface PlanInput {
    *  normalized region to crop pixels (settings.resolution only sizes
    *  canvas-mode recordings; raw captures keep the display's native size). */
   inputVideoSize?: { width: number; height: number } | null;
+  /** Probed audio codec of the input (e.g. "aac", "opus"). The final concat
+   *  may stream-copy only when the main line's audio is aac or absent; a
+   *  source-codec main line (no audio pass ran) keeps the filter path. */
+  inputAudioCodec?: string | null;
   /** Per-mask occurrence runs from the export-time scanner (aligned with the
    *  mask edits order): extra mosaics where the masked content reappears at
    *  a different spot. Absent = no occurrence scan was run. */
@@ -993,6 +1016,14 @@ export function planExport(input: PlanInput): ExportPlan {
   const mainFinal = path.join(workDir, "main.mp4");
   const wav = path.join(workDir, "audio16k.wav");
   const assFile = path.join(workDir, "subs.ass");
+
+  // Set when a stage that FULLY re-encodes the main line's video runs (region
+  // crop / mask burn / zoom pass / EDL segments). The subtitle burn is
+  // deliberately excluded: the runner stream-copies through it when ASR
+  // produced no cues, which would leave the main line as the source stream.
+  // The audio pass no longer re-encodes video (stream copy since the perf
+  // rework), so it cannot set this either.
+  let mainEncoded = false;
 
   // 0. Recordly-style zoom regions: mouse dwells become static-focus zoom
   //    spans (ease in -> hold -> ease out). Each span is rendered as a fixed
@@ -1028,6 +1059,7 @@ export function planExport(input: PlanInput): ExportPlan {
       ],
       output: cropped,
     });
+    mainEncoded = true;
     pipelineInput = cropped;
     srcW = cw;
     srcH = ch;
@@ -1105,6 +1137,7 @@ export function planExport(input: PlanInput): ExportPlan {
         stages.push(stage);
         src = masked;
       }
+      mainEncoded = true; // mask burn re-encodes the whole line
       pipelineInput = src;
     }
   }
@@ -1151,7 +1184,7 @@ export function planExport(input: PlanInput): ExportPlan {
         fromDepth: prevDepth,
       }));
     });
-    const listFile = path.join(workDir, "zoom_concat.txt");
+      const listFile = path.join(workDir, "zoom_concat.txt");
     const zoomed = path.join(workDir, "zoomed.mp4");
     intermediates.push(listFile, zoomed);
     stages.push({
@@ -1162,6 +1195,7 @@ export function planExport(input: PlanInput): ExportPlan {
       listFile,
       inputs: spanFiles,
     });
+    mainEncoded = true; // every span (incl. identity ones) re-encoded
     pipelineInput = zoomed;
   }
 
@@ -1196,6 +1230,7 @@ export function planExport(input: PlanInput): ExportPlan {
       listFile,
       inputs: segFiles,
     });
+    mainEncoded = true; // every segment re-encoded at cut boundaries
   }
 
   let current = needsSegments ? timeline : pipelineInput;
@@ -1282,6 +1317,7 @@ export function planExport(input: PlanInput): ExportPlan {
       listFile,
       inputs: parts,
       partDurations,
+      mainPart: current,
     });
     current = mainFinal;
   }
@@ -1323,6 +1359,7 @@ export function planExport(input: PlanInput): ExportPlan {
   return {
     stages,
     intermediates,
+    copyConcat: mainEncoded && (needsAudioPass || input.hasAudio === false || input.inputAudioCodec === "aac"),
     outputSize: { w: srcW, h: srcH },
     report: {
       cuts: rep.cuts.count,

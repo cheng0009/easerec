@@ -2,21 +2,23 @@
  * Export runner — executes a planned export stage by stage:
  *   - writes concat list files / sendcmd scripts the planner declared,
  *   - spawns ffmpeg for each stage (streaming stderr into a rolling log),
- *   - runs the ASR+LLM hook when the plan contains an "asr" stage,
+ *   - runs the ASR+LLM hook when the plan contains an "asr" stage (as a
+ *     background lane started long before the video line reaches it),
  *   - emits progress events to the renderer,
- *   - collects a human-readable report ("Saved to: …" + edit statistics).
+ *   - collects a human-readable report ("Saved to: …" + edit statistics),
+ *   - logs per-stage wall-clock timings so slow exports are attributable.
  */
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { concatArgs, concatListContent, encArgs, ENCODER_CANDIDATES, planExport, setPreferredVideoEnc, verticalArgs, verticalGeometry, type EncoderChoice, type ExportSettings } from "./plan";
+import { concatArgs, concatListContent, encArgs, ENCODER_CANDIDATES, planExport, secs, setPreferredVideoEnc, verticalArgs, verticalGeometry, type EncoderChoice, type ExportSettings, type StageBase } from "./plan";
 import { detectZoomRegions } from "../../src/recording/zoomRegions";
 import { generateAss } from "../subtitles/ass";
 import { segmentsToCues, type WhisperSegment } from "../subtitles/cues";
 import { correctTranscript, type LlmConfig } from "../subtitles/llm";
 import { resolveWhisper, runWhisper } from "../subtitles/whisper";
-import type { EdlFile, MaskEdit } from "../../src/recording/edl";
+import { buildTimeline, type EdlFile, type MaskEdit } from "../../src/recording/edl";
 import type { CameraSample } from "./plan";
 import { dHash, hashToHex, refFromFrame, type GrayFrame } from "../../src/lib/perceptualHash";
 import { scanPrivacyOccurrences, type OccMaskInput } from "../track";
@@ -129,24 +131,30 @@ function rectBitEq(a: { x: number; y: number; w: number; h: number }, b: { x: nu
   return Math.abs(ca.x - cb.x) <= tol && Math.abs(ca.y - cb.y) <= tol;
 }
 
-/** Probe a media file for duration (s), audio presence and video pixel size. */
-export function probeMedia(ffmpeg: string, file: string): Promise<{ durationS: number; hasAudio: boolean; width: number; height: number }> {
+/** Probe a media file for duration (s), audio presence, video pixel size,
+ *  video frame rate and the audio codec name. fps/codec parse to 0/null when
+ *  ffmpeg's banner doesn't carry them (callers treat that as "unknown"). */
+export function probeMedia(ffmpeg: string, file: string): Promise<{ durationS: number; hasAudio: boolean; width: number; height: number; fps: number; audioCodec: string | null }> {
   return new Promise((resolve) => {
     const child = spawn(ffmpeg, ["-i", file], { windowsHide: true });
     let out = "";
     const timer = setTimeout(() => { try { child.kill(); } catch { /* ignore */ } }, 15000);
     child.stderr?.on("data", (d: Buffer) => { out += d.toString(); });
-    child.on("error", () => { clearTimeout(timer); resolve({ durationS: 0, hasAudio: false, width: 0, height: 0 }); });
+    child.on("error", () => { clearTimeout(timer); resolve({ durationS: 0, hasAudio: false, width: 0, height: 0, fps: 0, audioCodec: null }); });
     child.on("close", () => {
       clearTimeout(timer);
       const m = out.match(/Duration:\s*(\d+):(\d{2}):(\d{2})\.(\d+)/);
       const durationS = m ? (+m[1] * 3600) + (+m[2] * 60) + +m[3] + Number(`0.${m[4]}`) : 0;
       const v = out.match(/Video:.*?(\d{2,5})x(\d{2,5})/);
+      const f = out.match(/Video:.*?(\d+(?:\.\d+)?)\s+fps/);
+      const a = out.match(/Audio:\s*([a-z0-9_-]+)/);
       resolve({
         durationS,
         hasAudio: /Audio:/.test(out),
         width: v ? +v[1] : 0,
         height: v ? +v[2] : 0,
+        fps: f ? parseFloat(f[1]) : 0,
+        audioCodec: a ? a[1] : null,
       });
     });
   });
@@ -220,10 +228,39 @@ function ffmpegProgressRelay(
   };
 }
 
+/** Per-stage timing: one log line per finished stage (console + export log)
+ *  so a slow export can be attributed to its passes — and improvements
+ *  measured — instead of guessed from the total. */
+function logStageDone(onLog: ((l: string) => void) | undefined, kind: string, label: string, ms: number): void {
+  const line = `[export] ${kind} done in ${(ms / 1000).toFixed(1)}s — ${label}`;
+  console.log(line);
+  onLog?.(line);
+}
+
+/** Drop "-movflags +faststart" from a command: the flag rewrites the finished
+ *  file to move moov up front — a second full write pass that is worth it only
+ *  for the user-facing deliverables, never for intermediates the pipeline
+ *  consumes (or re-encodes away) immediately afterwards. */
+function withoutFaststart(args: string[]): string[] {
+  const i = args.indexOf("-movflags");
+  if (i < 0) return args;
+  return [...args.slice(0, i), ...args.slice(i + 2)];
+}
+
+/** Args for executing a planned stage: deliverables (main output + vertical
+ *  derivative) keep +faststart, intermediates drop it. */
+function stageArgsFor(stage: StageBase, outputPath: string): string[] {
+  const args = stage.args ?? [];
+  return stage.output === outputPath || stage.kind === "vertical" ? args : withoutFaststart(args);
+}
+
 export async function runExportPipeline(req: RunExportRequest): Promise<string> {
   const { ctx } = req;
+  const tTotal0 = Date.now();
   // Before any stage runs: hardware-vs-software decides minutes vs hours.
+  const tEnc0 = Date.now();
   await detectVideoEncoder(ctx.ffmpegPath);
+  ctx.onLog?.(`[export] encoder probe done in ${((Date.now() - tEnc0) / 1000).toFixed(1)}s`);
   const workDir = path.join(req.outDir, ".dc-export-work");
   fs.mkdirSync(workDir, { recursive: true });
 
@@ -254,12 +291,74 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
   const wantsAudioProcessing = req.settings.subtitles || req.settings.loudnorm || !!req.settings.voiceEnhance || !!req.settings.bgmPath;
   let inputVideoSize: { width: number; height: number } | null = null;
   let hasAudio: boolean | undefined;
-  if ((req.recordRegion && req.recordRegion.w > 0.02 && req.recordRegion.h > 0.02) || maskEditsPresent || wantsAudioProcessing) {
+  let inputAudioCodec: string | null = null;
+  let exportFps = Math.max(1, Math.min(120, Math.round(req.settings.fps || 60)));
+  {
+    // Always probe (one cheap header read): geometry, audio presence, codec
+    // and the source frame rate all come from the same invocation.
     const info = await probeMedia(ctx.ffmpegPath, inputPath);
     if (info.width > 0 && info.height > 0) {
       inputVideoSize = { width: info.width, height: info.height };
     }
     if (wantsAudioProcessing) hasAudio = info.hasAudio;
+    inputAudioCodec = info.audioCodec;
+    // Export fps never exceeds the source frame rate: a config fps above the
+    // source only duplicates frames — pure extra encode/decode work. Never
+    // raise it, and skip the clamp when ffmpeg reported no sane fps token.
+    if (info.fps >= 1 && Math.round(info.fps) < exportFps) {
+      exportFps = Math.max(1, Math.round(info.fps));
+      ctx.onLog?.(`[export] fps clamped to ${exportFps} (source frame rate ${info.fps})`);
+    }
+  }
+  const settings: ExportSettings = { ...req.settings, fps: exportFps };
+
+  // ASR fast lane: build the transcription wav from an AUDIO-ONLY replica of
+  // the cut timeline (seconds of work, no video decode) and run the silence
+  // gate + Whisper + LLM in the BACKGROUND while the video line (occurrence
+  // scan, zoom spans, segments, burn) grinds through its encodes. The stage
+  // loop awaits the results at the extract/asr stages, so ASR latency no
+  // longer adds to the export's wall-clock.
+  const wavPath = path.join(workDir, "audio16k.wav");
+  const assPath = path.join(workDir, "subs.ass");
+  let planRef: ReturnType<typeof planExport> | null = null;
+  let asrNote = "";
+  let wavReady: Promise<void> | null = null;
+  let asrDone: Promise<void> | null = null;
+  if (settings.subtitles && hasAudio !== false) {
+    let resolveWav: () => void = () => { /* filled below */ };
+    wavReady = new Promise<void>((r) => { resolveWav = r; });
+    const asrT0 = Date.now();
+    asrDone = (async () => {
+      await buildAsrWavFast(ctx.ffmpegPath, inputPath, req.edl, req.durationMs, wavPath, ctx.onLog);
+      resolveWav();
+      // Subtitle geometry needs the plan's output size once it exists (region
+      // recordings crop the frame); before that, the settings dims are the
+      // best guess — and that window can only produce an EMPTY cue list,
+      // where PlayRes is irrelevant anyway.
+      const sz = () => {
+        const o = planRef?.outputSize;
+        return o
+          ? { width: o.w, height: o.h }
+          : { width: settings.sourceWidth, height: settings.sourceHeight };
+      };
+      const activeMs = fs.existsSync(wavPath) ? await measureActiveMs(ctx.ffmpegPath, wavPath) : 0;
+      const speechMs = activeMs ?? 0;
+      if (speechMs < MIN_ACTIVE_SPEECH_MS) {
+        asrNote = speechMs > 0
+          ? `\n（音频无有效语音，仅 ${speechMs} 毫秒底噪 — 未生成字幕）`
+          : "\n（音频为静音，未生成字幕）";
+        fs.writeFileSync(assPath, generateAss([], req.settings.subtitleStyle, sz()), "utf8");
+        ctx.onLog?.(`[export] asr lane: no usable speech (${speechMs}ms active) — subtitles skipped`);
+        return;
+      }
+      const ok = await runAsrStage(req, workDir, assPath);
+      if (!ok) {
+        // Subtitles were requested but ASR failed -> continue WITHOUT subs
+        // rather than losing the whole export (empty cue list).
+        fs.writeFileSync(assPath, generateAss([], req.settings.subtitleStyle, sz()), "utf8");
+      }
+      ctx.onLog?.(`[export] asr lane finished in ${((Date.now() - asrT0) / 1000).toFixed(1)}s`);
+    })();
   }
 
   // Occurrence scan: with masks in the EDL, rewind the whole recording and find
@@ -397,19 +496,18 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
     workDir,
     edl: exportEdl,
     durationMs: req.durationMs,
-    settings: req.settings,
+    settings,
     camTrackPath: req.camTrackPath,
     mouseTrack: req.mouseTrack,
     recordRegion: req.recordRegion ?? null,
     inputVideoSize,
+    inputAudioCodec,
     maskTracks,
     hasAudio,
   });
+  planRef = plan;
 
   const total = plan.stages.length;
-  // Set when the audio turned out to be silent — surfaced in the result so a
-  // film without subtitles reads as intentional, not as a bug.
-  let asrNote = "";
   // Subtitles were requested but the recording has NO audio stream: the plan
   // already dropped the extract/asr/burn stages — tell the user why.
   if (req.settings.subtitles && hasAudio === false) {
@@ -429,7 +527,10 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
   for (let si = 0; si < plan.stages.length; si++) {
     const stage = plan.stages[si];
     ctx.onProgress(stage.label, i++, total);
-
+    const stageT0 = Date.now();
+    // The body runs inside an async IIFE so every branch can `return` its
+    // failure and the wrapper below logs the stage's wall-clock exactly once.
+    const failure = await (async (): Promise<string | null> => {
     if (stage.kind === "zoomspan") {
       // Gather the contiguous zoomspan run and render it concurrently.
       let sj = si;
@@ -441,7 +542,7 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
       const worker = async (): Promise<void> => {
         while (cursor < batch.length && !failure) {
           const st = batch[cursor++];
-          const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, st.args!, ctx.onLog, st.cwd);
+          const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, stageArgsFor(st, req.outputPath), ctx.onLog, st.cwd);
           done++;
           ctx.onProgress(`缩放片段 ${done}/${batch.length}`, Math.min(total - 1, si + done), total);
           if (!ok) failure = `Export failed at: ${st.label}
@@ -452,43 +553,96 @@ ${tail}`;
       if (failure) return failure;
       i = sj;
       si = sj - 1; // the for-loop's si++ resumes at the first non-zoomspan stage
-      continue;
+      return null;
     }
 
     switch (stage.kind) {
       case "concat": {
         // EDL segment list: uniform params -> demuxer stream copy is exact.
         fs.writeFileSync(stage.listFile!, concatListContent(stage.inputs!), "utf8");
-        const args = concatArgs(stage.listFile!, stage.output, false, req.settings.fps);
+        const args = withoutFaststart(concatArgs(stage.listFile!, stage.output, false, settings.fps));
         const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, args, ctx.onLog);
         if (!ok) return `Export failed at: ${stage.label}\n${tail}`;
-        break;
+        return null;
       }
       case "final-concat": {
-        // Intro/outro/brand may be arbitrary videos. The concat DEMUXER with
-        // re-encode inflates duration (~+0.7s/extra part on this ffmpeg
-        // build); the concat FILTER is exact, so normalize every input
-        // (scale/SAR/pix_fmt/fps + audio format, silent track when missing)
-        // and splice in-filter. Sizes come from the PLAN (region recording
-        // crops the frame — scaling to the settings size would distort).
+        // Preferred path (plan.copyConcat): only the SHORT parts (intro/
+        // outro/brand — seconds each) are transcoded, normalized to the main
+        // line's own encoder settings, and the film splices via the concat
+        // DEMUXER with stream copy — the exact splice the zoom/segment
+        // concats already rely on. This avoids re-encoding the entire film
+        // just to append a 2.8s brand card. The gate guarantees the main
+        // line was encoded by this pipeline (matching params) and its audio
+        // is aac (or absent); anything else falls through to the filter
+        // concat below, which re-encodes but accepts arbitrary inputs.
         const parts = stage.inputs!;
         const W = plan.outputSize.w;
         const H = plan.outputSize.h;
-        const F = Math.max(1, Math.round(req.settings.fps));
+        const F = Math.max(1, Math.round(settings.fps));
         const partDurations = stage.partDurations ?? [];
+        const isImg = (p: string) => /\.(png|jpe?g|gif|webp|bmp)$/i.test(p);
+        if (plan.copyConcat) {
+          const finalParts: string[] = [];
+          for (let pi = 0; pi < parts.length; pi++) {
+            const part = parts[pi];
+            if (part === stage.mainPart) { finalParts.push(part); continue; }
+            const norm = path.join(workDir, `fpart_${pi}.mp4`);
+            const dur = Math.max(0.1, partDurations[pi] ?? 3);
+            const vChain = isImg(part)
+              ? `scale=${W}:${H},setsar=1,format=yuv420p`
+              : `scale=${W}:${H},setsar=1,format=yuv420p,fps=${F}`;
+            const inputs: string[] = isImg(part)
+              ? ["-loop", "1", "-framerate", String(F), "-t", dur.toFixed(3), "-i", part]
+              : ["-i", part];
+            let nArgs: string[];
+            if (hasAudio === false) {
+              // The main line carries no audio track — parts must match that
+              // stream layout for the demuxer concat to stay frame-exact.
+              nArgs = ["-y", ...inputs, "-vf", vChain, "-map", "0:v:0", "-an",
+                ...encArgs(W, H), "-r", String(F), norm];
+            } else {
+              const info = isImg(part) ? { hasAudio: false, durationS: dur } : await probeMedia(ctx.ffmpegPath, part);
+              if (info.hasAudio) {
+                nArgs = ["-y", ...inputs, "-vf", vChain, "-map", "0:v:0", "-map", "0:a:0",
+                  "-af", "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo",
+                  ...encArgs(W, H), "-r", String(F), norm];
+              } else {
+                inputs.push("-f", "lavfi", "-t", Math.max(0.1, info.durationS).toFixed(3), "-i", "anullsrc=r=48000:cl=stereo");
+                nArgs = ["-y", ...inputs,
+                  "-filter_complex",
+                  `[0:v]${vChain}[v];[1:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[a]`,
+                  "-map", "[v]", "-map", "[a]",
+                  ...encArgs(W, H), "-r", String(F), norm];
+              }
+            }
+            const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, nArgs, ctx.onLog);
+            if (!ok) return `Export failed at: ${stage.label} (normalize ${path.basename(part)})\n${tail}`;
+            finalParts.push(norm);
+          }
+          fs.writeFileSync(stage.listFile!, concatListContent(finalParts), "utf8");
+          const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, withoutFaststart(concatArgs(stage.listFile!, stage.output, false, F)), ctx.onLog);
+          if (!ok) return `Export failed at: ${stage.label}\n${tail}`;
+          ctx.onLog?.("[export] final concat spliced via stream copy (no film re-encode)");
+          return null;
+        }
+        // Fallback: the concat DEMUXER with re-encode inflates duration
+        // (~+0.7s/extra part on this ffmpeg build); the concat FILTER is
+        // exact, so normalize every input (scale/SAR/pix_fmt/fps + audio
+        // format, silent track when missing) and splice in-filter. Sizes come
+        // from the PLAN (region recording crops the frame — scaling to the
+        // settings size would distort).
         const inputs: string[] = [];
         const chains: string[] = [];
         const labels: string[] = [];
         let idx = 0;
-        for (let i = 0; i < parts.length; i++) {
-          const part = parts[i];
+        for (let i2 = 0; i2 < parts.length; i2++) {
+          const part = parts[i2];
           const vIdx = idx++;
           // Still-image intro/outro parts: loop the single frame for the
           // configured hold duration (3s default), with a silent track of
           // the same length. Videos are handled through probeMedia below.
-          const isImg = /\.(png|jpe?g|gif|webp|bmp)$/i.test(part);
-          if (isImg) {
-            const dur = Math.max(0.1, partDurations[i] ?? 3);
+          if (isImg(part)) {
+            const dur = Math.max(0.1, partDurations[i2] ?? 3);
             inputs.push("-loop", "1", "-t", dur.toFixed(3), "-i", part);
             const aIdx = idx++;
             inputs.push("-f", "lavfi", "-t", dur.toFixed(3), "-i", "anullsrc=r=48000:cl=stereo");
@@ -515,43 +669,30 @@ ${tail}`;
           "-y", ...inputs,
           "-filter_complex", graph,
           "-map", "[v]", "-map", "[a]",
-          ...encArgs(W, H), "-r", String(F), "-movflags", "+faststart",
+          ...encArgs(W, H), "-r", String(F),
           stage.output,
         ];
-        const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, args, ctx.onLog);
+        const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, withoutFaststart(args), ctx.onLog);
         if (!ok) return `Export failed at: ${stage.label}\n${tail}`;
-        break;
+        return null;
       }
       case "asr": {
-        // Sustained-speech gate: a "recording" whose audio is genuinely silent
-        // (or so quiet it is below a noise floor) makes Whisper hallucinate
-        // fluent nonsense — measure the real signal TIME via silencedetect and
-        // skip transcription when there is nothing audible. This FIRMLY fails
-        // closed: a missing/empty/unreadable wav (e.g. no audio stream) counts
-        // as 0 active ms, so no wav state can ever feed Whisper fake silence.
-        const wavPath = path.join(workDir, "audio16k.wav");
-        const activeMs = fs.existsSync(wavPath)
-          ? await measureActiveMs(ctx.ffmpegPath, wavPath)
-          : 0;
-        const speechMs = activeMs ?? 0;
-        if (speechMs < MIN_ACTIVE_SPEECH_MS) {
-          asrNote = speechMs > 0
-            ? `\n（音频无有效语音，仅 ${speechMs} 毫秒底噪 — 未生成字幕）`
-            : "\n（音频为静音，未生成字幕）";
-          fs.writeFileSync(stage.output, generateAss([], req.settings.subtitleStyle, {
-            width: plan.outputSize.w, height: plan.outputSize.h,
-          }), "utf8");
-          break;
+        // The fast lane (started before the video stages) built the wav from
+        // an audio-only replica and ran the sustained-speech gate + Whisper +
+        // LLM in the background; by the time the video line reaches this point
+        // the result is usually already on disk. The gate itself FIRMLY fails
+        // closed inside the lane: a missing/empty/unreadable wav counts as 0
+        // active ms, so no wav state can ever feed Whisper fake silence.
+        if (asrDone) {
+          await asrDone;
+          return null;
         }
-        const ok = await runAsrStage(req, workDir, stage.output);
-        if (!ok) {
-          // Subtitles were requested but ASR failed -> continue WITHOUT subs
-          // rather than losing the whole export (empty cue list).
-          fs.writeFileSync(stage.output, generateAss([], req.settings.subtitleStyle, {
-            width: plan.outputSize.w, height: plan.outputSize.h,
-          }), "utf8");
-        }
-        break;
+        // Defensive fallback (lane not started): fail closed to empty cues so
+        // the burn stage stream-copies through instead of dying.
+        fs.writeFileSync(stage.output, generateAss([], req.settings.subtitleStyle, {
+          width: plan.outputSize.w, height: plan.outputSize.h,
+        }), "utf8");
+        return null;
       }
       case "burn": {
         // Skip the extra re-encode pass when ASR produced no cues at all, but
@@ -560,11 +701,11 @@ ${tail}`;
         if (!assText.includes("Dialogue:")) {
           const burnInput = stage.args![stage.args!.indexOf("-i") + 1];
           fs.copyFileSync(burnInput, stage.output);
-          break;
+          return null;
         }
-        const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, stage.args!, ctx.onLog, stage.cwd);
+        const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, stageArgsFor(stage, req.outputPath), ctx.onLog, stage.cwd);
         if (!ok) return `Export failed at: ${stage.label}\n${tail}`;
-        break;
+        return null;
       }
       case "vertical": {
         // Framing follows the zoom regions (where the presenter worked);
@@ -603,21 +744,37 @@ ${tail}`;
         fs.writeFileSync(stage.sendcmdFile!, geo.sendcmd, "utf8");
         const args = verticalArgs(
           req.outputPath, stage.output, geo, stage.sendcmdFile!,
-          stage.verticalWidth, stage.verticalHeight, req.settings.fps,
+          stage.verticalWidth, stage.verticalHeight, settings.fps,
         );
         // A vertical-derivative failure must not fail the main export.
         const v = await execFfmpeg(ctx.ffmpegPath, args, ffmpegProgressRelay(req, stage.label, i - 1, total), stage.cwd);
         if (!v.ok) console.error(`[export] vertical pass failed:\n${v.tail}`);
-        break;
+        return null;
       }
       default: {
-        if (!stage.args) break;
-        const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, stage.args, ffmpegProgressRelay(req, stage.label, i - 1, total), stage.cwd);
+        if (!stage.args) return null;
+        // The ASR fast lane already built audio16k.wav (an audio-only replica
+        // of the cut timeline, equivalent to what this extract would produce):
+        // wait for it rather than re-extracting from the video timeline.
+        if (wavReady && stage.kind === "transcode" && path.basename(stage.output) === "audio16k.wav") {
+          await wavReady;
+          if (fs.existsSync(stage.output)) return null;
+        }
+        const { ok, tail } = await execFfmpeg(ctx.ffmpegPath, stageArgsFor(stage, req.outputPath), ffmpegProgressRelay(req, stage.label, i - 1, total), stage.cwd);
         if (!ok) return `Export failed at: ${stage.label}\n${tail}`;
+        return null;
       }
     }
+    })();
+    logStageDone(ctx.onLog, stage.kind, stage.label, Date.now() - stageT0);
+    if (failure) return failure;
   }
   ctx.onProgress("done", total, total);
+  {
+    const line = `[export] pipeline finished in ${((Date.now() - tTotal0) / 1000).toFixed(1)}s (${total} stages)`;
+    console.log(line);
+    ctx.onLog?.(line);
+  }
 
   const r = plan.report;
   const parts: string[] = [];
@@ -668,6 +825,75 @@ async function measureActiveMs(ffmpegPath: string, wav: string): Promise<number 
       resolve(Math.max(0, Math.round(totalMs - silentMs)));
     });
   });
+}
+
+/** Build the ASR wav from an AUDIO-ONLY replica of the cut timeline.
+ *  Equivalent to the historic "extract from timeline.mp4" but needs no video
+ *  decode: plain 1x segments are seeked straight out of the source audio, F4
+ *  speedups get their whoosh/mute replacement audio at output duration, and
+ *  the parts concatenate into one 16k mono wav. Finishes in seconds even for
+ *  hour-long films, which is what lets transcription start (and usually
+ *  finish) while the video line is still encoding. Any failure removes the
+ *  partial wav — the callers fail closed on a missing file. */
+async function buildAsrWavFast(
+  ffmpeg: string,
+  input: string,
+  edl: EdlFile,
+  durationMs: number,
+  wavOut: string,
+  onLog?: (l: string) => void,
+): Promise<void> {
+  const rm = (): void => { try { fs.rmSync(wavOut, { force: true }); } catch { /* ignore */ } };
+  const needsSegments = edl.edits.some((e) => e.type === "cut" || e.type === "speedup");
+  const enc = ["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"];
+  if (!needsSegments) {
+    const { ok } = await execFfmpeg(ffmpeg, ["-y", "-i", input, "-vn", ...enc, wavOut], onLog);
+    if (!ok) rm();
+    return;
+  }
+  const segments = buildTimeline(edl, durationMs);
+  const workDir = path.dirname(wavOut);
+  const parts: string[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const part = path.join(workDir, `asrpart_${i}.wav`);
+    const outSecs = (seg.outEndMs - seg.outStartMs) / 1000;
+    let args: string[];
+    if (seg.speed === 1) {
+      args = [
+        "-y", "-ss", secs(seg.srcStartMs), "-t", secs(seg.srcEndMs - seg.srcStartMs), "-i", input,
+        "-vn", ...enc, part,
+      ];
+    } else {
+      // Speedups never carry speech in the film: the audio is the whoosh (or
+      // silence) at the COMPRESSED duration — replicate that exactly so the
+      // transcript's clock matches the exported timeline.
+      const via = seg.via as { audio: "mute" | "whoosh" };
+      if (via.audio === "whoosh") {
+        const fadeStart = Math.max(0, outSecs - 0.3);
+        args = [
+          "-y", "-f", "lavfi", "-t", outSecs.toFixed(3), "-i", "anoisesrc=color=pink:r=48000:amplitude=0.35",
+          "-af", `lowpass=f=900,afade=t=in:st=0:d=0.3,afade=t=out:st=${fadeStart.toFixed(3)}:d=0.3`,
+          ...enc, part,
+        ];
+      } else {
+        args = [
+          "-y", "-f", "lavfi", "-t", outSecs.toFixed(3), "-i", "anullsrc=r=48000:cl=mono",
+          ...enc, part,
+        ];
+      }
+    }
+    const { ok } = await execFfmpeg(ffmpeg, args);
+    if (ok && fs.existsSync(part)) parts.push(part);
+    else { rm(); return; }
+  }
+  if (parts.length === 1) {
+    try { fs.renameSync(parts[0], wavOut); return; } catch { /* fall through to concat */ }
+  }
+  const listFile = path.join(workDir, "asr_concat.txt");
+  fs.writeFileSync(listFile, concatListContent(parts), "utf8");
+  const { ok } = await execFfmpeg(ffmpeg, ["-y", "-f", "concat", "-safe", "0", "-i", listFile, "-c", "copy", wavOut], onLog);
+  if (!ok) rm();
 }
 
 async function runAsrStage(req: RunExportRequest, workDir: string, assFile: string): Promise<boolean> {

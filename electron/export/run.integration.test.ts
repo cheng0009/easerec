@@ -9,7 +9,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -428,6 +428,7 @@ describe.runIf(hasFfmpeg)("export pipeline (real ffmpeg)", () => {
       expect(g.length).toBeLessThan(30000);
     }
     // Run the chained passes end-to-end against the real ffmpeg.
+    mkdirSync(path.join(tmpdir(), "opencode", "burn_probe"), { recursive: true });
     for (let bi = 0; bi < burns.length; bi++) {
       const b = burns[bi];
       writeFileSync(path.join(tmpdir(), "opencode", "burn_probe", `burn_args_${bi}.json`), JSON.stringify(b.args));
@@ -560,6 +561,45 @@ describe.runIf(hasFfmpeg)("brand outro (real ffmpeg)", () => {
     const dur = await probeDurationSecs(output);
     expect(dur).toBeGreaterThan(7.4);
     expect(dur).toBeLessThan(8.2);
+  }, 180000);
+
+  it("zoom pass + brand outro splices via stream copy (film is never re-encoded for the card)", async () => {
+    // Zoom re-encodes the main line with the pipeline's own encoder and the
+    // fixture audio is aac, so the final concat must take the copy path: only
+    // the 2.8s brand card is transcoded, the 5s film itself rides a stream
+    // copy. Duration stays exact (5 + 2.8s).
+    const input = path.join(dir, "brand_zoom_src.mp4");
+    const output = path.join(dir, "brand_zoom_out.mp4");
+    generateInput(input, 5);
+    const track = parseMouseTrack(
+      Array.from({ length: 100 }, (_, i) => JSON.stringify({ tMs: i * 50, x: 0.5, y: 0.5 })).join("\n") + "\n",
+    );
+    const settings = {
+      ...baseSettings(),
+      zoomEnabled: true,
+      brandOutro: true,
+      brandFontPath: path.join(process.env.WINDIR || "C:\Windows", "Fonts", "msyh.ttc"),
+      brandTitle: "简录 EaseRec",
+      brandSlogan: "简录，让知识输出回归纯粹。",
+    };
+    const log: string[] = [];
+    const res = await runExportPipeline({
+      inputPath: input, outputPath: output, outDir: dir,
+      edl: emptyEdl(), durationMs: 5000, settings, mouseTrack: track,
+      llmConfig: { enabled: false, baseUrl: "", apiKey: "", model: "" },
+      ctx: { ...ctx(), onLog: (l) => log.push(l) },
+    });
+    expect(res).toContain("Saved to:");
+    expect(existsSync(output)).toBe(true);
+    expect(log.some((l) => l.includes("final concat spliced via stream copy")), JSON.stringify(log, null, 2)).toBe(true);
+    const dur = await probeDurationSecs(output);
+    expect(dur).toBeGreaterThan(7.4);
+    expect(dur).toBeLessThan(8.2);
+    // The spliced output must be a playable, properly indexed mp4.
+    const info = await probeMedia(FFMPEG, output);
+    expect(info.hasAudio).toBe(true);
+    expect(info.width).toBe(320);
+    expect(info.height).toBe(240);
   }, 180000);
 });
 

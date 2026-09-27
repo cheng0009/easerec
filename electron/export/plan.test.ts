@@ -196,6 +196,23 @@ describe("planExport", () => {
     expect(kindsOf(plan.stages)).toEqual(["audio", "transcode", "asr", "burn", "transcode"]);
   });
 
+  it("audio pass copies the video stream through untouched (no full re-encode)", () => {
+    // The stage only transforms audio; re-encoding the picture here cost a
+    // full-length encode per export while changing nothing.
+    const settings = { ...baseSettings(), loudnorm: true };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings,
+    });
+    const audioArgs = plan.stages[0].args!;
+    expect(audioArgs[audioArgs.indexOf("-c:v") + 1]).toBe("copy");
+    expect(audioArgs.join(" ")).not.toContain("libopenh264");
+    expect(audioArgs.join(" ")).not.toContain("-pix_fmt");
+    expect(audioArgs.join(" ")).not.toContain("-r");
+    // audio still re-encodes to the pipeline's uniform aac 48k stereo
+    expect(audioArgs[audioArgs.indexOf("-c:a") + 1]).toBe("aac");
+  });
+
   it("chains a timbre style into the serial -af chain (no reverb)", () => {
     const settings = { ...baseSettings(), voiceEnhance: true, voiceEnhanceStrength: "standard", voiceTimbre: "magnetic" };
     const plan = planExport({
@@ -385,6 +402,70 @@ describe("planExport", () => {
     const v = plan.stages.find((s) => s.kind === "vertical")!;
     expect(v.output).toBe("C:/out/o_vertical.mp4");
     expect(v.sendcmdFile).toContain("vertical_sendcmd.txt");
+  });
+
+  it("final concat may stream-copy when the zoom pass encoded the main line (aac source)", () => {
+    // Zoom spans re-encode the whole timeline with the pipeline's own encoder
+    // settings and the source audio is aac -> the brand card can be
+    // normalized and spliced without re-encoding the film.
+    const settings = { ...baseSettings(), zoomEnabled: true, brandOutro: true };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings,
+      mouseTrack: Array.from({ length: 100 }, (_, i) => ({ tMs: i * 500, x: 0.5, y: 0.5 })),
+      inputAudioCodec: "aac",
+    });
+    expect(plan.copyConcat).toBe(true);
+    const fc = plan.stages.find((st) => st.kind === "final-concat")!;
+    expect(fc.mainPart).toContain("zoomed.mp4");
+    expect(fc.inputs).toContain(fc.mainPart);
+  });
+
+  it("final concat keeps the re-encode path for an untouched source line", () => {
+    // No zoom/segments/masks: the main line is still the SOURCE stream, whose
+    // params the pipeline does not control -> filter concat (status quo).
+    const settings = { ...baseSettings(), brandOutro: true };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings,
+      inputAudioCodec: "aac",
+    });
+    expect(plan.copyConcat).toBe(false);
+  });
+
+  it("final concat keeps the re-encode path for a non-aac source without an audio pass", () => {
+    // webm/opus source with every audio feature off: the main line's audio
+    // stays opus, which cannot concat-copy against aac brand parts.
+    const settings = { ...baseSettings(), zoomEnabled: true, brandOutro: true };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings,
+      mouseTrack: Array.from({ length: 100 }, (_, i) => ({ tMs: i * 500, x: 0.5, y: 0.5 })),
+      inputAudioCodec: "opus",
+    });
+    expect(plan.copyConcat).toBe(false);
+  });
+
+  it("an audio pass (aac re-encode) re-enables copy concat regardless of the source codec", () => {
+    const settings = { ...baseSettings(), zoomEnabled: true, brandOutro: true, loudnorm: true };
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000, settings,
+      mouseTrack: Array.from({ length: 100 }, (_, i) => ({ tMs: i * 500, x: 0.5, y: 0.5 })),
+      inputAudioCodec: "opus",
+      hasAudio: true,
+    });
+    expect(plan.copyConcat).toBe(true);
+  });
+
+  it("segments alone (no zoom) also mark the main line as pipeline-encoded", () => {
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: appendEdit(emptyEdl(), cut(20000, 24000)), durationMs: 60000,
+      settings: { ...baseSettings(), brandOutro: true },
+      inputAudioCodec: "aac",
+    });
+    expect(plan.copyConcat).toBe(true);
   });
 });
 
