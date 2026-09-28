@@ -8,3 +8,15 @@ export const DEFAULT_RECORDING_CONFIG = {
   zoomEnabled: true,
   zoomLevel: 1.5,
 } as const;
+
+/** MiniMax 预置音色（AI 换声用）——共享给渲染端下拉框与主进程客户端。
+ *  只收录适合中文讲解的教学感音色；用户克隆的音色在设置里动态追加。 */
+export const MINIMAX_PRESET_VOICES: { id: string; label: string }[] = [
+  { id: "male-qn-qingse", label: "青涩男声 · 干净清爽" },
+  { id: "male-qn-jingying", label: "精英男声 · 沉稳专业" },
+  { id: "male-qn-badao", label: "霸道男声 · 磁性浑厚" },
+  { id: "female-shaonv", label: "少女音 · 明快亲切" },
+  { id: "female-yujie", label: "御姐音 · 从容大气" },
+  { id: "female-chengshu", label: "成熟女声 · 温和可信" },
+  { id: "female-tianmei", label: "甜美女声 · 活泼轻快" },
+];

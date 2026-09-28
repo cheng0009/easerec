@@ -12,7 +12,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { concatArgs, concatListContent, encArgs, ENCODER_CANDIDATES, planExport, secs, setPreferredVideoEnc, verticalArgs, verticalGeometry, type EncoderChoice, type ExportSettings, type StageBase } from "./plan";
+import { audioPassStage, concatArgs, concatListContent, encArgs, ENCODER_CANDIDATES, planExport, secs, setPreferredVideoEnc, verticalArgs, verticalGeometry, type EncoderChoice, type ExportSettings, type StageBase } from "./plan";
 import { detectZoomRegions } from "../../src/recording/zoomRegions";
 import { generateAss } from "../subtitles/ass";
 import { segmentsToCues, type WhisperSegment } from "../subtitles/cues";
@@ -23,6 +23,8 @@ import type { CameraSample } from "./plan";
 import { dHash, hashToHex, refFromFrame, type GrayFrame } from "../../src/lib/perceptualHash";
 import { scanPrivacyOccurrences, type OccMaskInput } from "../track";
 import { scanBacktrace } from "../backtrace";
+import { friendlyError, MinimaxError, minimaxTts, MINIMAX_CN_BASE, type TtsResult } from "../tts/minimax";
+import { planPlacement, placementsToSubtitleSegments } from "../tts/placement";
 
 export interface RunContext {
   ffmpegPath: string;
@@ -31,6 +33,16 @@ export interface RunContext {
   asrLanguage: string;
   onProgress: (label: string, index: number, total: number) => void;
   onLog?: (line: string) => void;
+  /** Test seam: synthesize "text" with "voiceId" without touching the
+   *  network. Production leaves it unset (MiniMax client is used). */
+  ttsOverride?: (text: string, voiceId: string) => Promise<TtsResult | null>;
+}
+
+export interface VoiceSwapRequest {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  voiceId: string;
 }
 
 export interface RunExportRequest {
@@ -46,6 +58,8 @@ export interface RunExportRequest {
   /** Mouse trajectory (follow-focus + vertical reframe source). */
   mouseTrack?: { tMs: number; x: number; y: number }[];
   llmConfig: LlmConfig;
+  /** MiniMax voice-swap plumbing; presence of key+voiceId activates it. */
+  voiceSwap?: VoiceSwapRequest;
   ctx: RunContext;
 }
 
@@ -310,21 +324,32 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
       ctx.onLog?.(`[export] fps clamped to ${exportFps} (source frame rate ${info.fps})`);
     }
   }
-  const settings: ExportSettings = { ...req.settings, fps: exportFps };
+  // Voice swap is armed only when the user both toggled it AND supplied the
+  // MiniMax credentials — otherwise the export silently keeps the original
+  // voice (with a note) instead of dying mid-pipeline.
+  const voiceSwapWanted = req.settings.voiceSwap === true;
+  const voiceSwapOn = voiceSwapWanted && hasAudio !== false &&
+    !!req.voiceSwap?.apiKey && !!req.voiceSwap?.voiceId;
+  const settings: ExportSettings = { ...req.settings, fps: exportFps, voiceSwap: voiceSwapOn };
 
   // ASR fast lane: build the transcription wav from an AUDIO-ONLY replica of
   // the cut timeline (seconds of work, no video decode) and run the silence
   // gate + Whisper + LLM in the BACKGROUND while the video line (occurrence
   // scan, zoom spans, segments, burn) grinds through its encodes. The stage
   // loop awaits the results at the extract/asr stages, so ASR latency no
-  // longer adds to the export's wall-clock.
+  // longer adds to the export's wall-clock. With voice swap armed the lane
+  // continues into filler-stripped correction + MiniMax TTS + track assembly.
   const wavPath = path.join(workDir, "audio16k.wav");
   const assPath = path.join(workDir, "subs.ass");
   let planRef: ReturnType<typeof planExport> | null = null;
   let asrNote = "";
   let wavReady: Promise<void> | null = null;
   let asrDone: Promise<void> | null = null;
-  if (settings.subtitles && hasAudio !== false) {
+  if (voiceSwapWanted && hasAudio !== false && !voiceSwapOn) {
+    asrNote = "\n（AI 换声缺少 API Key 或音色 — 本次导出保留原声）";
+    ctx.onLog?.("[voice] swap requested but unconfigured (no API key / voice id) — keeping the original voice");
+  }
+  if ((settings.subtitles || voiceSwapOn) && hasAudio !== false) {
     let resolveWav: () => void = () => { /* filled below */ };
     wavReady = new Promise<void>((r) => { resolveWav = r; });
     const asrT0 = Date.now();
@@ -344,19 +369,42 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
       const activeMs = fs.existsSync(wavPath) ? await measureActiveMs(ctx.ffmpegPath, wavPath) : 0;
       const speechMs = activeMs ?? 0;
       if (speechMs < MIN_ACTIVE_SPEECH_MS) {
-        asrNote = speechMs > 0
+        asrNote = (voiceSwapOn ? "\n（音频无有效语音 — 未换声）" : "") + (speechMs > 0
           ? `\n（音频无有效语音，仅 ${speechMs} 毫秒底噪 — 未生成字幕）`
-          : "\n（音频为静音，未生成字幕）";
+          : "\n（音频为静音，未生成字幕）");
         fs.writeFileSync(assPath, generateAss([], req.settings.subtitleStyle, sz()), "utf8");
         ctx.onLog?.(`[export] asr lane: no usable speech (${speechMs}ms active) — subtitles skipped`);
         return;
       }
-      const ok = await runAsrStage(req, workDir, assPath);
-      if (!ok) {
-        // Subtitles were requested but ASR failed -> continue WITHOUT subs
-        // rather than losing the whole export (empty cue list).
+      const segs = await transcribeSegments(req, workDir, { stripFillers: voiceSwapOn });
+      if (!segs) {
+        // Subtitles/swap were requested but transcription failed -> continue
+        // WITHOUT them rather than losing the whole export (empty cue list).
         fs.writeFileSync(assPath, generateAss([], req.settings.subtitleStyle, sz()), "utf8");
+        if (voiceSwapOn) asrNote += "\n（语音识别失败 — 未换声，保留原声）";
+        return;
       }
+      let spoken = segs;
+      if (voiceSwapOn) {
+        const trackMs = (await probeMedia(ctx.ffmpegPath, wavPath)).durationS * 1000;
+        const vt = await synthesizeVoiceTrack({
+          ctx, req, workDir, segs, totalMs: trackMs,
+          onProgress: (done, n) => ctx.onProgress(`🔊 AI 换声 ${done}/${n}`, 0, 1),
+        });
+        if (vt) {
+          spoken = vt;
+          ctx.onLog?.(`[voice] swap ok: ${vt.length} 段语音已合成并按时间轴安放`);
+        } else {
+          asrNote += "\n（AI 换声未完成 — 本次导出保留原声）";
+        }
+      }
+      fs.writeFileSync(assPath, generateAss(segmentsToCues(spoken), req.settings.subtitleStyle, sz()), "utf8");
+      // Persist the SPOKEN transcript next to the output video so chapter /
+      // metadata generation can run later without re-transcribing.
+      try {
+        const transcriptPath = path.join(req.outDir, path.basename(req.outputPath) + ".transcript.json");
+        fs.writeFileSync(transcriptPath, JSON.stringify(spoken, null, 2), "utf8");
+      } catch { /* best-effort */ }
       ctx.onLog?.(`[export] asr lane finished in ${((Date.now() - asrT0) / 1000).toFixed(1)}s`);
     })();
   }
@@ -753,6 +801,28 @@ ${tail}`;
       }
       default: {
         if (!stage.args) return null;
+        // The swap needs the TTS lane's voice_track.wav: wait for the lane,
+        // then fall back to the ORIGINAL voice when synthesis failed (the
+        // rebuilt args describe the classic audio pass).
+        if (stage.kind === "audio" && voiceSwapOn) {
+          if (asrDone) await asrDone;
+          const vt = path.join(workDir, "voice_track.wav");
+          if (!fs.existsSync(vt)) {
+            const inputArg = stage.args[stage.args.indexOf("-i") + 1];
+            stage.args = audioPassStage(inputArg, stage.output, {
+              loudnorm: settings.loudnorm,
+              voiceEnhance: settings.voiceEnhance ? (settings.voiceEnhanceStrength || "standard") : false,
+              timbre: settings.voiceTimbre && settings.voiceTimbre !== "none" ? settings.voiceTimbre : undefined,
+              reverb: settings.voiceReverb && settings.voiceReverb !== "none" ? settings.voiceReverb : undefined,
+              bgm: settings.bgmPath || null,
+              bgmVolume: settings.bgmVolume,
+              fps: settings.fps,
+              w: plan.outputSize.w,
+              h: plan.outputSize.h,
+            }).args;
+            ctx.onLog?.("[voice] voice_track.wav missing — audio pass keeps the original voice");
+          }
+        }
         // The ASR fast lane already built audio16k.wav (an audio-only replica
         // of the cut timeline, equivalent to what this extract would produce):
         // wait for it rather than re-extracting from the video timeline.
@@ -785,7 +855,6 @@ ${tail}`;
   return `Saved to: ${req.outputPath}${suffix}${asrNote}`;
 }
 
-/** whisper -> optional LLM correction -> ASS. */
 /** Silence gate constants: audio below -35dB sustained for ≥0.4s counts as
  *  silence; < MIN_ACTIVE_SPEECH_MS of non-silent audio is "no real speech". */
 const SILENCE_NOISE_DB = -35;
@@ -896,13 +965,20 @@ async function buildAsrWavFast(
   if (!ok) rm();
 }
 
-async function runAsrStage(req: RunExportRequest, workDir: string, assFile: string): Promise<boolean> {
+/** whisper -> optional LLM correction (filler-stripping when voice swap is
+ *  armed). Returns the timed segments, or null when transcription itself
+ *  failed — callers fail open to an empty cue list. */
+async function transcribeSegments(
+  req: RunExportRequest,
+  workDir: string,
+  opts: { stripFillers?: boolean } = {},
+): Promise<WhisperSegment[] | null> {
   const wav = path.join(workDir, "audio16k.wav");
-  if (!fs.existsSync(wav)) return false;
+  if (!fs.existsSync(wav)) return null;
   const bin = resolveWhisper(req.ctx.projectDir, req.ctx.whisperModelPath);
   if (!bin) {
     console.error("[export] whisper-cli not found — run scripts/download-whisper.ps1");
-    return false;
+    return null;
   }
   const res = await runWhisper(bin, wav, workDir, {
     language: req.ctx.asrLanguage || "zh",
@@ -910,27 +986,135 @@ async function runAsrStage(req: RunExportRequest, workDir: string, assFile: stri
   });
   if (!res.ok) {
     console.error("[export] whisper failed:", res.error);
-    return false;
+    return null;
   }
   const timed: WhisperSegment[] = res.segments;
   const corrected = await correctTranscript(
     timed.map((s, id) => ({ id, text: s.text })),
     req.llmConfig,
+    fetch,
+    { stripFillers: opts.stripFillers },
   );
-  const merged = timed.map((seg, id) => {
+  return timed.map((seg, id) => {
     const c = corrected[id];
     return c ? { ...seg, text: c.text } : seg;
   });
-  const ass = generateAss(segmentsToCues(merged), req.settings.subtitleStyle, {
-    width: req.settings.sourceWidth,
-    height: req.settings.sourceHeight,
-  });
-  fs.writeFileSync(assFile, ass, "utf8");
-  // Persist the corrected transcript next to the output video so chapter /
-  // metadata generation can run later without re-transcribing.
-  try {
-    const transcriptPath = path.join(req.outDir, path.basename(req.outputPath) + ".transcript.json");
-    fs.writeFileSync(transcriptPath, JSON.stringify(merged, null, 2), "utf8");
-  } catch { /* best-effort */ }
-  return true;
+}
+
+/**
+ * Synthesize the swapped narration with MiniMax and lay it onto the export
+ * timeline: per-segment TTS (3 workers, retry on rate limits) -> placement
+ * (atempo fit, never overlapping the next words) -> 48k stereo voice_track.wav
+ * spliced from clips and silence gaps. Returns the subtitle segments that
+ * reflect what is actually spoken now, or null on any failure (the caller
+ * keeps the original voice).
+ */
+async function synthesizeVoiceTrack(p: {
+  ctx: RunContext;
+  req: RunExportRequest;
+  workDir: string;
+  segs: WhisperSegment[];
+  totalMs: number;
+  onProgress?: (done: number, total: number) => void;
+}): Promise<{ startMs: number; endMs: number; text: string }[] | null> {
+  const { ctx, req, workDir } = p;
+  const cfg = {
+    baseUrl: req.voiceSwap?.baseUrl || MINIMAX_CN_BASE,
+    apiKey: req.voiceSwap!.apiKey,
+    model: req.voiceSwap!.model || "speech-02-turbo",
+  };
+  const voiceId = req.voiceSwap!.voiceId;
+  const ttsFn = ctx.ttsOverride ?? ((text: string) => minimaxTts(cfg, text, voiceId));
+  const items = p.segs.filter((s) => (s.text || "").trim().length > 0);
+  if (items.length === 0) {
+    ctx.onLog?.("[voice] transcript is empty after filler cleanup — nothing to synthesize");
+    return null;
+  }
+  ctx.onLog?.(`[voice] synthesizing ${items.length} segments (voice ${voiceId}, model ${cfg.model})`);
+
+  interface Clip { idx: number; file: string; durationMs: number }
+  const clips: Clip[] = [];
+  let cursor = 0;
+  let done = 0;
+  let failed = false;
+  const worker = async (): Promise<void> => {
+    while (cursor < items.length && !failed) {
+      const i = cursor++;
+      const text = items[i].text.trim();
+      let res: TtsResult | null = null;
+      for (let attempt = 0; attempt < 3 && !res && !failed; attempt++) {
+        try {
+          res = await ttsFn(text, voiceId);
+          if (!res) { failed = true; return; }
+        } catch (e) {
+          const retryable = e instanceof MinimaxError && e.retryable;
+          ctx.onLog?.(`[voice] tts segment ${i + 1} attempt ${attempt + 1} failed: ${friendlyError(e)}`);
+          if (!retryable) { failed = true; return; }
+          await new Promise((r) => setTimeout(r, 900 * (attempt + 1)));
+        }
+      }
+      if (!res) { failed = true; return; }
+      const file = path.join(workDir, `tts_${i}.mp3`);
+      try { fs.writeFileSync(file, res.audio); } catch { failed = true; return; }
+      let durationMs = res.durationMs;
+      if (!durationMs) {
+        durationMs = Math.round((await probeMedia(ctx.ffmpegPath, file)).durationS * 1000);
+      }
+      clips.push({ idx: i, file, durationMs });
+      done++;
+      p.onProgress?.(done, items.length);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(3, items.length) }, worker));
+  if (failed || clips.length === 0) {
+    ctx.onLog?.("[voice] TTS failed — keeping the original voice");
+    return null;
+  }
+
+  const placements = planPlacement(
+    clips.map((c) => ({
+      startMs: items[c.idx].startMs,
+      endMs: items[c.idx].endMs,
+      text: items[c.idx].text.trim(),
+      synthMs: c.durationMs || 500,
+      file: c.file,
+    })),
+    p.totalMs,
+  );
+
+  // Render each clip to 48k stereo (atempo when it must fit its slot), then
+  // splice clips + silence gaps into one full-length track — the exact
+  // concat-demuxer pattern the rest of the pipeline already relies on.
+  const parts: string[] = [];
+  let t = 0;
+  const mkGap = async (ms: number, name: string): Promise<boolean> => {
+    const f = path.join(workDir, name);
+    const { ok } = await execFfmpeg(ctx.ffmpegPath, [
+      "-y", "-f", "lavfi", "-t", (Math.max(0, ms) / 1000).toFixed(3), "-i", "anullsrc=r=48000:cl=stereo",
+      "-c:a", "pcm_s16le", f,
+    ]);
+    if (!ok) return false;
+    parts.push(f);
+    return true;
+  };
+  for (let i = 0; i < placements.length; i++) {
+    const pl = placements[i];
+    if (pl.startMs - t > 30 && !(await mkGap(pl.startMs - t, `vt_gap_${i}.wav`))) return null;
+    const part = path.join(workDir, `vt_clip_${i}.wav`);
+    const af = pl.atempo > 1.001 ? `atempo=${pl.atempo.toFixed(4)}` : "anull";
+    const { ok } = await execFfmpeg(ctx.ffmpegPath, [
+      "-y", "-i", pl.file, "-af", af, "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", part,
+    ]);
+    if (!ok) return null;
+    parts.push(part);
+    t = pl.endMs;
+  }
+  if (p.totalMs - t > 30 && !(await mkGap(p.totalMs - t, "vt_tail.wav"))) return null;
+
+  const listFile = path.join(workDir, "vt_concat.txt");
+  fs.writeFileSync(listFile, concatListContent(parts), "utf8");
+  const track = path.join(workDir, "voice_track.wav");
+  const { ok } = await execFfmpeg(ctx.ffmpegPath, ["-y", "-f", "concat", "-safe", "0", "-i", listFile, "-c", "copy", track], ctx.onLog);
+  if (!ok || !fs.existsSync(track)) return null;
+  return placementsToSubtitleSegments(placements);
 }

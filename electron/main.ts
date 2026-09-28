@@ -1575,6 +1575,50 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>, _event?:
       }, fetch);
     }
 
+    // --- MiniMax voice swap (AI 换声) --------------------------------------
+    case "minimax_test": {
+      const { minimaxTestConnection } = await import("./tts/minimax");
+      const mm = (args.minimax ?? {}) as Record<string, unknown>;
+      return minimaxTestConnection({
+        baseUrl: String(mm.base_url || ""),
+        apiKey: String(mm.api_key || ""),
+        model: String(mm.model || "speech-02-turbo"),
+      }, String(mm.voice_id || ""), fetch);
+    }
+    case "minimax_preview": {
+      const { minimaxTts, friendlyError } = await import("./tts/minimax");
+      const mm = (args.minimax ?? {}) as Record<string, unknown>;
+      const text = String(args.text || "") || "欢迎使用简录，AI 换声让你的讲解更清晰流畅。";
+      try {
+        const r = await minimaxTts({
+          baseUrl: String(mm.base_url || ""),
+          apiKey: String(mm.api_key || ""),
+          model: String(mm.model || "speech-02-turbo"),
+        }, text, String(mm.voice_id || ""), { fetchFn: fetch, timeoutMs: 30_000 });
+        return { ok: true, audioB64: r.audio.toString("base64"), durationMs: r.durationMs };
+      } catch (e) {
+        return { ok: false, error: friendlyError(e) };
+      }
+    }
+    case "minimax_clone": {
+      const { minimaxCloneVoice, friendlyError } = await import("./tts/minimax");
+      const mm = (args.minimax ?? {}) as Record<string, unknown>;
+      const audioPath = String(args.audioPath || "");
+      if (!audioPath || !fs.existsSync(audioPath)) {
+        return { ok: false, error: "音频文件不存在（支持 mp3 / m4a / wav，时长 10 秒至 5 分钟）" };
+      }
+      try {
+        const r = await minimaxCloneVoice({
+          baseUrl: String(mm.base_url || ""),
+          apiKey: String(mm.api_key || ""),
+          model: "",
+        }, audioPath, fetch);
+        return { ok: true, voiceId: r.voiceId };
+      } catch (e) {
+        return { ok: false, error: friendlyError(e) };
+      }
+    }
+
     case "export_video":
       return runExport(args);
 
@@ -1632,6 +1676,7 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
 
   const style = (config.subtitle_style ?? {}) as Record<string, unknown>;
   const llm = (config.llm ?? {}) as Record<string, unknown>;
+  const minimax = (config.minimax ?? {}) as Record<string, unknown>;
   // Windows CJK-capable font for the brand outro card (best first).
   const brandFont = ["msyh.ttc", "msyhbd.ttc", "simhei.ttf", "segoeui.ttf"]
     .map((f) => path.join(process.env.WINDIR || "C:\Windows", "Fonts", f))
@@ -1662,6 +1707,7 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
     brandSlogan: brandZh ? "让知识输出回归纯粹" : "Recording, simplified.",
     brandSloganEn: brandZh ? "Let knowledge output return to purity." : "",
     loudnorm: config.loudnorm === true,
+    voiceSwap: config.voice_swap === true,
     voiceEnhance: config.voice_enhance === true,
     voiceEnhanceStrength: String(config.voice_enhance_strength || "standard"),
     // Timbre/reverb are sub-gears of the voice-beautify master toggle: zero
@@ -1702,6 +1748,12 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
     edl,
     durationMs,
     settings: { ...settings, zoomEnabled: config.zoom_enabled === true },
+    voiceSwap: {
+      baseUrl: String(minimax.base_url || ""),
+      apiKey: String(minimax.api_key || ""),
+      model: String(minimax.model || ""),
+      voiceId: String(minimax.voice_id || ""),
+    },
     mouseTrack,
     recordRegion: (() => {
       try {

@@ -36,16 +36,33 @@ export const DEFAULT_LLM_CONFIG: LlmConfig = {
 
 export const BATCH_SIZE = 40;
 
-export function buildCorrectionSystemPrompt(glossary?: string): string {
+/** System prompt for the correction pass. `stripFillers` switches on the
+ *  voice-swap mode: besides fixing typos, the model also deletes filler
+ *  words (语气词/口水词) so the synthesized voice never speaks them — and a
+ *  segment that was ONLY fillers comes back as an empty string. */
+export function buildCorrectionSystemPrompt(
+  glossary?: string,
+  opts: { stripFillers?: boolean } = {},
+): string {
+  const strip = opts.stripFillers === true;
   return [
     "你是视频字幕校对员。输入是语音识别(ASR)输出的分段文本，每段有唯一 id。",
-    "任务：修正每段文本中的错别字、同音字错误、标点，使语句通顺自然。",
+    strip
+      ? "任务：修正每段文本中的错别字、同音字错误、标点，并删除冗余的语气词与口水词，使语句通顺精炼。"
+      : "任务：修正每段文本中的错别字、同音字错误、标点，使语句通顺自然。",
     "规则（必须严格遵守）：",
     "1. 只改写每段自身的文本，绝不增加、删除、合并或拆分段落；",
-    "2. 不改写专有名词的拼写，除非明显是同音错字；",
-    "3. 保留口语语气，不要润色成书面语；",
-    "4. 输出严格的 JSON：{\"segments\":[{\"id\":<原id>,\"text\":\"<改写后文本>\"}]}，id 集合必须与输入完全一致；",
-    "5. 除 JSON 外不要输出任何内容。",
+    ...(strip
+      ? [
+        "2. 删除「嗯、啊、呃、哦、诶、唉、那个、这个、就是说、就是、然后、对吧、你知道吗、怎么说呢」等纯语气词/口水词，以及紧邻的重复词（如「就是就是」）；",
+        "3. 删除后不得改变原意、不得补充新内容、不得把口语改写成书面语；删掉的词前后拼起来必须仍是一句通顺的话；",
+        "4. 若某段删除后没有实质内容（整段都是语气词），该段 text 输出空字符串 \"\"；",
+      ]
+      : []),
+    strip ? "5. 不改写专有名词的拼写，除非明显是同音错字；" : "2. 不改写专有名词的拼写，除非明显是同音错字；",
+    strip ? "6. 输出严格的 JSON：{\"segments\":[{\"id\":<原id>,\"text\":\"<改写后文本>\"}]}，id 集合必须与输入完全一致；" : "3. 保留口语语气，不要润色成书面语；",
+    strip ? "7. 除 JSON 外不要输出任何内容。" : "4. 输出严格的 JSON：{\"segments\":[{\"id\":<原id>,\"text\":\"<改写后文本>\"}]}，id 集合必须与输入完全一致；",
+    ...(strip ? [] : ["5. 除 JSON 外不要输出任何内容。"]),
     glossary?.trim() ? `热词表（专有名词，必须保持原样）：${glossary.trim()}` : "",
   ].filter(Boolean).join("\n");
 }
@@ -147,12 +164,12 @@ export async function correctTranscript(
   segments: IndexedSegment[],
   config: LlmConfig,
   fetchFn: typeof fetch = fetch,
-  opts: { batchSize?: number; timeoutMs?: number } = {},
+  opts: { batchSize?: number; timeoutMs?: number; stripFillers?: boolean } = {},
 ): Promise<CorrectedSegment[]> {
   if (!config.enabled || !config.apiKey || segments.length === 0) {
     return segments.map((s) => ({ ...s, corrected: false }));
   }
-  const system = buildCorrectionSystemPrompt(config.glossary);
+  const system = buildCorrectionSystemPrompt(config.glossary, { stripFillers: opts.stripFillers });
   const batches = batchSegments(segments, opts.batchSize ?? BATCH_SIZE);
   const out: CorrectedSegment[] = [];
   for (const batch of batches) {

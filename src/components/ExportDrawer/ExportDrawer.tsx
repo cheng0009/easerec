@@ -4,6 +4,7 @@ import { tauriInvoke } from "../../lib/tauri";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useTauriEvent } from "../../hooks/useTauriEvent";
 import { useLang, isZhLang } from "../../lib/useLang";
+import { MINIMAX_PRESET_VOICES } from "../../lib/constants";
 import successSoundUrl from "../../assets/successsound.WAV";
 
 /** Right-side export drawer — everything between "素材" and "可发布的成片". */
@@ -23,6 +24,14 @@ export function ExportDrawer() {
   const [llmTestResult, setLlmTestResult] = useState<string | null>(null);
   const [whisperOk, setWhisperOk] = useState<boolean | null>(null);
   const [sysFonts, setSysFonts] = useState<string[]>([]);
+  // MiniMax voice swap: connection test / preview / clone-uploading state.
+  const [mmTesting, setMmTesting] = useState(false);
+  const [mmTestResult, setMmTestResult] = useState<string | null>(null);
+  const [mmPreviewing, setMmPreviewing] = useState(false);
+  const [clonePath, setClonePath] = useState("");
+  const [cloneName, setCloneName] = useState("");
+  const [cloning, setCloning] = useState(false);
+  const [cloneMsg, setCloneMsg] = useState<string | null>(null);
   // Hotword auto-extraction: candidates from the last transcript, picked via
   // chips, then merged into settings.glossary.
   const [hwSuggested, setHwSuggested] = useState<string[] | null>(null);
@@ -57,6 +66,77 @@ export function ExportDrawer() {
   const style = settings.subtitleStyle;
   const updateStyle = (patch: Partial<typeof style>) => setSettings({ subtitleStyle: { ...style, ...patch } });
   const updateLlm = (patch: Partial<typeof settings.llm>) => setSettings({ llm: { ...settings.llm, ...patch } });
+  const updateMinimax = (patch: Partial<typeof settings.minimax>) => setSettings({ minimax: { ...settings.minimax, ...patch } });
+
+  const mmConfig = () => ({
+    base_url: settings.minimax.baseUrl,
+    api_key: settings.minimax.apiKey,
+    model: settings.minimax.model,
+    voice_id: settings.minimaxVoiceId,
+  });
+
+  const testMinimax = async () => {
+    setMmTesting(true); setMmTestResult(null);
+    try {
+      const res = await tauriInvoke<{ ok: boolean; detail: string }>("minimax_test", { minimax: mmConfig() });
+      setMmTestResult(res?.detail ?? (isZhLang() ? "无响应" : "No response"));
+    } catch (e) {
+      setMmTestResult(isZhLang() ? `连接失败：${e}` : `Connection failed: ${e}`);
+    } finally { setMmTesting(false); }
+  };
+
+  /** Preview the currently selected voice with a fixed sample sentence. */
+  const previewVoice = async () => {
+    if (!settings.minimax.apiKey || !settings.minimaxVoiceId) return;
+    setMmPreviewing(true);
+    try {
+      const res = await tauriInvoke<{ ok: boolean; audioB64?: string; error?: string }>("minimax_preview", { minimax: mmConfig() });
+      if (res?.ok && res.audioB64) {
+        const audio = new Audio(`data:audio/mp3;base64,${res.audioB64}`);
+        void audio.play().catch(() => {});
+      } else {
+        setMmTestResult(res?.error ?? (isZhLang() ? "试听失败" : "Preview failed"));
+      }
+    } catch (e) {
+      setMmTestResult(isZhLang() ? `试听失败：${e}` : `Preview failed: ${e}`);
+    } finally { setMmPreviewing(false); }
+  };
+
+  const pickCloneSample = async () => {
+    const picked = await open({
+      multiple: false, title: L("选择要克隆的干声样本", "Pick a clean voice sample"),
+      filters: [{ name: L("音频", "Audio"), extensions: ["mp3", "m4a", "wav"] }],
+    });
+    if (typeof picked === "string") {
+      setClonePath(picked);
+      if (!cloneName) setCloneName(picked.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") || "我的音色");
+    }
+  };
+
+  /** Two-step clone (upload + register) via the user's MiniMax account; the
+   *  returned voice_id joins the local library and becomes the selection. */
+  const uploadClone = async () => {
+    if (!settings.minimax.apiKey || !clonePath) return;
+    setCloning(true); setCloneMsg(L("上传并克隆中（约需十几秒）…", "Uploading & cloning (~15s)…"));
+    try {
+      const res = await tauriInvoke<{ ok: boolean; voiceId?: string; error?: string }>("minimax_clone", {
+        minimax: mmConfig(), audioPath: clonePath,
+      });
+      if (res?.ok && res.voiceId) {
+        const entry = { id: res.voiceId, name: cloneName.trim() || "我的音色", createdAt: Date.now() };
+        setSettings({
+          minimaxVoices: [...settings.minimaxVoices.filter((v) => v.id !== entry.id), entry],
+          minimaxVoiceId: entry.id,
+        });
+        setCloneMsg(L("✓ 克隆成功，已选为当前音色（7 天内至少使用一次，否则会被平台回收）", "Cloned and selected (use it at least once every 7 days)"));
+        setClonePath(""); setCloneName("");
+      } else {
+        setCloneMsg(`✗ ${res?.error ?? L("克隆失败", "Clone failed")}`);
+      }
+    } catch (e) {
+      setCloneMsg(`✗ ${String(e)}`);
+    } finally { setCloning(false); }
+  };
 
   const testLlm = async () => {
     setLlmTesting(true); setLlmTestResult(null);
@@ -104,6 +184,13 @@ export function ExportDrawer() {
           voice_enhance_strength: settings.voiceEnhanceStrength,
           voice_timbre: settings.voiceTimbre,
           voice_reverb: settings.voiceReverb,
+          voice_swap: settings.voiceSwap,
+          minimax: {
+            base_url: settings.minimax.baseUrl,
+            api_key: settings.minimax.apiKey,
+            model: settings.minimax.model,
+            voice_id: settings.minimaxVoiceId,
+          },
           bgm_path: settings.bgmPath,
           bgm_volume: settings.bgmVolume,
           loudnorm: settings.loudnorm,
@@ -309,6 +396,104 @@ export function ExportDrawer() {
           </div>
           <input type="checkbox" checked readOnly disabled title={L("固定开启", "Always on")} />
         </div>
+      </Group>
+
+      <Group label={L("AI 换声", "AI voice swap")}>
+        <Toggle label={L("AI 换声（重新配音）", "AI voice swap (re-voice)")}
+          hint={L("讲解先转成文字，AI 校正并去除语气词口水词，再用选定音色重新配音替换原声（需 MiniMax API）", "Transcribe → AI-correct & strip fillers → re-voice with your chosen MiniMax voice")}
+          value={settings.voiceSwap}
+          onChange={(v) => setSettings({ voiceSwap: v })} />
+        {settings.voiceSwap && (
+          <div style={styles.subBlock}>
+            <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 4 }}>
+              {L("需填写你自己的 MiniMax API Key（minimax.cn 平台申请）。换声开启时人声美化链自动跳过 — TTS 已是干净人声。",
+                 "Fill in YOUR OWN MiniMax API key. The enhance chain is skipped while swapping — TTS is already studio-clean.")}
+            </div>
+            <Row label={L("接口区域", "Region")}>
+              <select value={settings.minimax.baseUrl} style={inp}
+                onChange={(e) => updateMinimax({ baseUrl: e.target.value })}>
+                <option value="https://api.minimax.cn">{L("中国大陆（api.minimax.cn）", "China (api.minimax.cn)")}</option>
+                <option value="https://api.minimaxi.com">{L("国际（api.minimaxi.com）", "International (api.minimaxi.com)")}</option>
+              </select>
+            </Row>
+            <Row label="API Key">
+              <input type="password" placeholder="eyJhb…（必填）" value={settings.minimax.apiKey} style={{ ...inp, flex: 1 }}
+                onChange={(e) => updateMinimax({ apiKey: e.target.value })} />
+            </Row>
+            <Row label={L("合成质量", "Quality")}>
+              <select value={settings.minimax.model} style={inp}
+                onChange={(e) => updateMinimax({ model: e.target.value })}>
+                <option value="speech-02-turbo">{L("速度优先（turbo，推荐）", "Speed first (turbo, recommended)")}</option>
+                <option value="speech-02-hd">{L("音质优先（hd）", "Quality first (hd)")}</option>
+              </select>
+            </Row>
+            <Row label={L("音色", "Voice")}>
+              <select value={settings.minimaxVoiceId} style={{ ...inp, flex: 1 }}
+                onChange={(e) => setSettings({ minimaxVoiceId: e.target.value })}>
+                <option value="">{L("— 选择音色 —", "— pick a voice —")}</option>
+                <optgroup label={L("预置音色", "System voices")}>
+                  {MINIMAX_PRESET_VOICES.map((v) => (
+                    <option key={v.id} value={v.id}>{v.label}</option>
+                  ))}
+                </optgroup>
+                {settings.minimaxVoices.length > 0 && (
+                  <optgroup label={L("我的克隆音色", "My cloned voices")}>
+                    {settings.minimaxVoices.map((v) => (
+                      <option key={v.id} value={v.id}>{`${v.name}（克隆）`}</option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+              <button style={styles.miniBtn} onClick={() => void previewVoice()}
+                disabled={mmPreviewing || !settings.minimax.apiKey || !settings.minimaxVoiceId}
+                title={L("用当前音色试听一句", "Preview the selected voice")}>
+                {mmPreviewing ? "…" : "🎧"}
+              </button>
+            </Row>
+            <Row label=" ">
+              <button style={{ ...styles.miniBtn, flex: 1, color: mmTesting ? "var(--text-muted)" : "var(--accent)" }}
+                onClick={testMinimax} disabled={mmTesting || !settings.minimax.apiKey}>
+                {mmTesting ? L("⏳ 测试中…", "Testing…") : L("🔌 测试连接", "Test connection")}
+              </button>
+            </Row>
+            {mmTestResult && (
+              <div style={{ fontSize: 11, color: mmTestResult.startsWith("✓") ? "var(--accent)" : "var(--danger, #e5484d)", wordBreak: "break-all" }}>
+                {mmTestResult}
+              </div>
+            )}
+            <div style={{ ...rowStyle, flexDirection: "column", alignItems: "stretch", gap: 4, marginTop: 10 }}>
+              <span style={labelStyle}>{L("上传干声克隆自己的音色（10 秒 ~ 5 分钟，无背景音乐）", "Clone your own voice (10s–5min, no BGM)")}</span>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button style={styles.miniBtn} onClick={() => void pickCloneSample()}>🎤 {L("选择样本", "Pick sample")}</button>
+                <input type="text" value={cloneName} placeholder={L("音色名称", "Voice name")} style={{ ...inp, flex: 1 }}
+                  onChange={(e) => setCloneName(e.target.value)} />
+                <button style={{ ...styles.hwAdd, opacity: cloning || !settings.minimax.apiKey || !clonePath ? 0.6 : 1 }}
+                  onClick={() => void uploadClone()} disabled={cloning || !settings.minimax.apiKey || !clonePath}>
+                  {cloning ? L("克隆中…", "Cloning…") : L("上传克隆", "Clone")}
+                </button>
+              </div>
+              {clonePath && <div style={{ fontSize: 10, color: "var(--text-muted)" }} title={clonePath}>🎙 {clonePath.split(/[\\/]/).pop()}</div>}
+              {cloneMsg && <div style={{ fontSize: 11, color: cloneMsg.startsWith("✓") ? "var(--accent)" : "var(--danger, #e5484d)" }}>{cloneMsg}</div>}
+              {settings.minimaxVoices.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 2 }}>
+                  {settings.minimaxVoices.map((v) => (
+                    <div key={v.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ fontSize: 11, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                        title={v.id}>{settings.minimaxVoiceId === v.id ? "★ " : ""}{v.name}</span>
+                      <button style={styles.hwMini}
+                        onClick={() => setSettings({ minimaxVoiceId: v.id })}>{L("选用", "Use")}</button>
+                      <button style={styles.hwMini}
+                        onClick={() => setSettings({
+                          minimaxVoices: settings.minimaxVoices.filter((x) => x.id !== v.id),
+                          ...(settings.minimaxVoiceId === v.id ? { minimaxVoiceId: "" } : {}),
+                        })}>{L("移除", "Remove")}</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </Group>
 
       <Group label={L("字幕", "Subtitles")}>

@@ -257,6 +257,28 @@ describe("LLM correction", () => {
     expect(buildCorrectionUserPrompt([{ id: 3, text: "x" }])).toContain("3: x");
   });
 
+  it("stripFillers mode instructs filler removal and allows empty output", async () => {
+    const sys = buildCorrectionSystemPrompt(undefined, { stripFillers: true });
+    expect(sys).toContain("删除冗余的语气词与口水词");
+    expect(sys).toContain("空字符串");
+    expect(sys).not.toContain("保留口语语气");
+    // A pure-filler segment may legitimately come back empty — the validator
+    // must accept it (empty string is still a string).
+    const ok = validateCorrectionResponse(
+      JSON.stringify({ segments: [{ id: 0, text: "" }, { id: 1, text: "打开设置" }] }),
+      [{ id: 0, text: "嗯嗯" }, { id: 1, text: "打开设置" }],
+    );
+    expect(ok).toEqual([{ id: 0, text: "" }, { id: 1, text: "打开设置" }]);
+    // And correctTranscript forwards the option into the prompt.
+    const fetchOk = vi.fn().mockImplementation(async () => ({
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify({ segments: [{ id: 0, text: "好" }] }) } }] }),
+    }));
+    await correctTranscript([{ id: 0, text: "嗯 那个好" }], { baseUrl: "x", apiKey: "k", model: "m", enabled: true }, fetchOk as unknown as typeof fetch, { stripFillers: true });
+    const sent = JSON.parse(String(fetchOk.mock.calls[0][1]!.body));
+    expect(sent.messages[0].content).toContain("口水词");
+  });
+
   it("applyCorrections swaps text by index", () => {
     const timed = [{ startMs: 0, endMs: 1000, text: "a" }, { startMs: 1, endMs: 2000, text: "b" }];
     const out = applyCorrections(timed, [{ id: 1, text: "B" }]);

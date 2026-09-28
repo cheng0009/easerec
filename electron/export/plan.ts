@@ -58,6 +58,10 @@ export interface ExportSettings {
   voiceEnhance?: boolean;
   /** Voice beautification intensity ("light" | "standard" | "strong"). */
   voiceEnhanceStrength?: string;
+  /** AI voice swap: replace the recorded narration with MiniMax TTS over the
+   *  corrected, filler-stripped transcript. Forces the ASR lane + an audio
+   *  pass even with every other audio feature off. */
+  voiceSwap?: boolean;
   /** Voice timbre style on top of the cleanup chain ("none" | "magnetic" | "bright"). */
   voiceTimbre?: string;
   /** Room reverb on the voice ("none" | "light" | "studio"). */
@@ -520,8 +524,35 @@ export function audioPassStage(
     fps: number;
     w?: number;
     h?: number;
+    /** Voice swap: a 48k stereo wav of the synthesized narration that
+     *  REPLACES the recording's original voice. Cleanup/timbre/reverb chains
+     *  are skipped — TTS output is already studio-clean; loudnorm and the
+     *  BGM under-mix still apply. */
+    voiceTrack?: string | null;
   },
 ): StageBase {
+  // ---- Voice-swap variant: audio comes from the synthesized track ----
+  if (opts.voiceTrack) {
+    const args: string[] = ["-y", "-i", input, "-i", opts.voiceTrack];
+    const tail = opts.loudnorm ? ["loudnorm=I=-16:TP=-1.5:LRA=11"] : [];
+    const parts = ["换声", ...tail, opts.bgm ? "bgm" : ""].filter(Boolean);
+    if (opts.bgm) {
+      const level = opts.bgmVolume === "low" ? "0.10" : opts.bgmVolume === "high" ? "0.35" : "0.20";
+      args.push("-stream_loop", "-1", "-i", opts.bgm);
+      const fc =
+        `[1:a]${tail.join(",") || "anull"}[va];` +
+        `[2:a]volume=${level}[m];` +
+        `[va][m]amix=inputs=2:duration=first:normalize=0[aout]`;
+      args.push("-filter_complex", fc, "-map", "0:v:0", "-map", "[aout]");
+    } else if (tail.length) {
+      args.push("-map", "0:v:0", "-map", "1:a:0", "-af", tail.join(","));
+    } else {
+      args.push("-map", "0:v:0", "-map", "1:a:0");
+    }
+    args.push("-c:v", "copy", "-c:a", "aac", "-ar", "48000", "-ac", "2", out);
+    return { kind: "audio", label: `audio pass (${parts.join(" + ")})`, args, output: out };
+  }
+
   const pre: string[] = [];
   if (opts.voiceEnhance) pre.push(...voiceEnhanceChain(String(opts.voiceEnhance)));
   if (opts.timbre) pre.push(...timbreChain(opts.timbre));
@@ -1204,9 +1235,14 @@ export function planExport(input: PlanInput): ExportPlan {
   // re-encode on top of the mask burn.
   const needsSegments = edl.edits.some((e) => e.type === "cut" || e.type === "speedup");
   const hasAudio = input.hasAudio !== false;
+  const voiceSwapOn = settings.voiceSwap === true && hasAudio;
+  // ASR feeds both the subtitle burn AND the voice swap; the extract+asr
+  // stages exist whenever either consumer needs a transcript.
+  const needsAsr = (settings.subtitles || voiceSwapOn) && hasAudio;
   const needsAudioPass = (settings.loudnorm || !!settings.voiceEnhance || !!settings.bgmPath ||
     (settings.voiceTimbre ? settings.voiceTimbre !== "none" : false) ||
-    (settings.voiceReverb ? settings.voiceReverb !== "none" : false)) && hasAudio;
+    (settings.voiceReverb ? settings.voiceReverb !== "none" : false) ||
+    voiceSwapOn) && hasAudio;
   const needsBurn = settings.subtitles && hasAudio;
   const brandOn = settings.brandOutro;
   const needsFinalConcat = (settings.introEnabled && !!settings.introPath) || (settings.outroEnabled && !!settings.outroPath) || brandOn;
@@ -1251,14 +1287,18 @@ export function planExport(input: PlanInput): ExportPlan {
       fps,
       w: srcW,
       h: srcH,
+      voiceTrack: voiceSwapOn ? path.join(workDir, "voice_track.wav") : null,
     }));
     current = av;
   }
 
-  if (needsBurn) {
-    intermediates.push(wav, assFile, subbed);
+  if (needsAsr) {
+    intermediates.push(wav, assFile);
     stages.push(extractWavStage(preBgmTimeline, wav));
     stages.push({ kind: "asr", label: "transcribe + optional LLM correction", args: null, output: assFile });
+  }
+  if (needsBurn) {
+    intermediates.push(subbed);
     stages.push(burnStage(current, subbed, assFile, fps, { w: srcW, h: srcH }));
     current = subbed;
   }

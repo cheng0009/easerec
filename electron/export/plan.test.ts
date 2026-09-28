@@ -467,6 +467,56 @@ describe("planExport", () => {
     });
     expect(plan.copyConcat).toBe(true);
   });
+
+  it("voice swap without subtitles still schedules audio pass + extract + asr (no burn)", () => {
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000,
+      settings: { ...baseSettings(), voiceSwap: true },
+      hasAudio: true,
+    });
+    expect(kindsOf(plan.stages)).toEqual(["audio", "transcode", "asr", "transcode"]);
+    const audioArgs = plan.stages[0].args!;
+    // Second input is the synthesized voice track.
+    const i1 = audioArgs.indexOf("-i");
+    const i2 = audioArgs.indexOf("-i", i1 + 1);
+    expect(audioArgs[i2 + 1]).toContain("voice_track.wav");
+    // Audio is taken from the TRACK, not the recording; video is copied.
+    expect(audioArgs[audioArgs.indexOf("-map") + 1]).toBe("0:v:0");
+    expect(audioArgs.join(" ")).toContain("-map 1:a:0");
+    expect(audioArgs.join(" ")).toContain("-c:v copy");
+    expect(audioArgs.join(" ")).not.toContain("afftdn");
+  });
+
+  it("voice swap + BGM mixes the music under the synthesized track", () => {
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000,
+      settings: { ...baseSettings(), voiceSwap: true, bgmPath: "C:/m/bgm.mp3", bgmVolume: "high", loudnorm: true },
+      hasAudio: true,
+    });
+    const audioArgs = plan.stages[0].args!;
+    const fc = audioArgs[audioArgs.indexOf("-filter_complex") + 1];
+    // loudnorm rides the synthesized voice; the bgm joins at its own level.
+    expect(fc).toContain("[1:a]loudnorm=I=-16:TP=-1.5:LRA=11[va]");
+    expect(fc).toContain("[2:a]volume=0.35[m]");
+    expect(fc).toContain("[va][m]amix=inputs=2:duration=first:normalize=0[aout]");
+    // The cleanup chain never touches TTS output.
+    expect(fc).not.toContain("afftdn");
+    expect(fc).not.toContain("aecho");
+  });
+
+  it("voice swap is dropped on a no-audio recording", () => {
+    const plan = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 60000,
+      settings: { ...baseSettings(), voiceSwap: true },
+      hasAudio: false,
+    });
+    const kinds = kindsOf(plan.stages);
+    expect(kinds).not.toContain("audio");
+    expect(kinds).not.toContain("asr");
+  });
 });
 
 describe("privacy mask burn", () => {

@@ -601,5 +601,57 @@ describe.runIf(hasFfmpeg)("brand outro (real ffmpeg)", () => {
     expect(info.width).toBe(320);
     expect(info.height).toBe(240);
   }, 180000);
+
+  it("voice-swap audio pass consumes voice_track.wav (real ffmpeg args)", async () => {
+    // The swap variant of the audio pass must take audio from the synthesized
+    // track (input #1) and copy the video through. Feed a real wav where the
+    // stage expects it and run the stage's exact command.
+    const input = path.join(dir, "vs_src.mp4");
+    generateInput(input, 4);
+    const plan = planExport({
+      inputPath: input, outputPath: path.join(dir, "vs_out.mp4"), workDir: dir,
+      edl: emptyEdl(), durationMs: 4000,
+      settings: { ...baseSettings(), voiceSwap: true, loudnorm: true },
+      hasAudio: true,
+    });
+    const audio = plan.stages.find((s) => s.kind === "audio")!;
+    const i1 = audio.args!.indexOf("-i");
+    const trackPath = audio.args![audio.args!.indexOf("-i", i1 + 1) + 1];
+    expect(trackPath).toContain("voice_track.wav");
+    // Fake synthesis: a distinct 300 Hz stereo track, full film length.
+    execFileSync(FFMPEG, [
+      "-y", "-f", "lavfi", "-t", "4", "-i", "sine=frequency=300:sample_rate=48000",
+      "-af", "aformat=channel_layouts=stereo", "-c:a", "pcm_s16le", trackPath,
+    ], { stdio: "ignore", timeout: 60000 });
+    const res = await execFfmpeg(FFMPEG, audio.args!);
+    expect(res.ok, res.tail).toBe(true);
+    const info = await probeMedia(FFMPEG, audio.output);
+    expect(info.hasAudio).toBe(true);
+    expect(info.durationS).toBeCloseTo(4, 0);
+  }, 120000);
+
+  it("voice swap falls back to the original voice when TTS cannot run", async () => {
+    // Subtitles off, swap armed with a bogus endpoint: transcription of a
+    // sine either yields nothing or the unreachable TTS fails — both paths
+    // must fail OPEN: export completes with the ORIGINAL voice + a note.
+    const input = path.join(dir, "vs_fb.mp4");
+    const output = path.join(dir, "vs_fb_out.mp4");
+    generateInput(input, 4);
+    const log: string[] = [];
+    const res = await runExportPipeline({
+      inputPath: input, outputPath: output, outDir: dir,
+      edl: emptyEdl(), durationMs: 4000,
+      settings: { ...baseSettings(), voiceSwap: true },
+      voiceSwap: { baseUrl: "http://127.0.0.1:1", apiKey: "k", model: "test", voiceId: "v" },
+      llmConfig: { enabled: false, baseUrl: "", apiKey: "", model: "" },
+      ctx: { ...ctx(), onLog: (l) => log.push(l) },
+    });
+    expect(res).toContain("Saved to:");
+    expect(res).toContain("保留原声");
+    expect(existsSync(output)).toBe(true);
+    const info = await probeMedia(FFMPEG, output);
+    expect(info.hasAudio).toBe(true);
+    expect(info.durationS).toBeCloseTo(4, 0);
+  }, 180000);
 });
 

@@ -122,6 +122,15 @@ export interface SettingsState {
   bgmPath: string;
   /** Background music level ("low" | "medium" | "high"). */
   bgmVolume: "low" | "medium" | "high";
+  /** AI voice swap: replace the recorded narration with MiniMax TTS over the
+   *  corrected, filler-stripped transcript (user's own API key + voice). */
+  voiceSwap: boolean;
+  /** MiniMax API config for voice swap (user's own key). */
+  minimax: { baseUrl: string; apiKey: string; model: string };
+  /** Selected voice id — a MiniMax system voice or a user-cloned one. */
+  minimaxVoiceId: string;
+  /** Voice library of clones uploaded by this user (persisted locally). */
+  minimaxVoices: { id: string; name: string; createdAt: number }[];
   /** Also produce a 9:16 vertical reframe on export. */
   verticalExport: boolean;
   /** Privacy backtrace fallback window (seconds) when matching fails. */
