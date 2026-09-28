@@ -328,11 +328,16 @@ export function ExportDrawer() {
       )}
 
       <Group label={L("画面与音频", "Picture & audio")}>
-        <Toggle label={L("人声美化", "Voice enhance")} hint={L("去底噪与隆隆声，人声更清晰饱满（推荐讲话类录制开启）", "Denoise + rumble cut — clearer, fuller voice (best for talking)")} value={settings.voiceEnhance}
-          onChange={(v) => setSettings({ voiceEnhance: v })} />
+        <Toggle label={L("人声美化", "Voice enhance")}
+          hint={settings.voiceSwap
+            ? L("AI 换声开启时自动跳过（TTS 已是干净人声）；若换声失败回退原声，美化仍会生效", "Auto-skipped while AI voice swap is on; still applied if the swap falls back to the original voice")
+            : L("去底噪与隆隆声，人声更清晰饱满（推荐讲话类录制开启）", "Denoise + rumble cut — clearer, fuller voice (best for talking)")}
+          value={settings.voiceEnhance}
+          onChange={(v) => setSettings({ voiceEnhance: v })}
+          disabled={settings.voiceSwap} />
         {settings.voiceEnhance && (
           <Row label={L("美化强度", "Strength")}>
-            <select value={settings.voiceEnhanceStrength} style={inp}
+            <select value={settings.voiceEnhanceStrength} style={inp} disabled={settings.voiceSwap}
               onChange={(e) => setSettings({ voiceEnhanceStrength: e.target.value as "light" | "standard" | "strong" })}>
               <option value="light">{L("轻度 — 保留现场感", "Light — keep room feel")}</option>
               <option value="standard">{L("标准 — 推荐", "Standard — recommended")}</option>
@@ -342,7 +347,7 @@ export function ExportDrawer() {
         )}
         {settings.voiceEnhance && (
           <Row label={L("音色风格", "Timbre")}>
-            <select value={settings.voiceTimbre} style={inp}
+            <select value={settings.voiceTimbre} style={inp} disabled={settings.voiceSwap}
               onChange={(e) => setSettings({ voiceTimbre: e.target.value as "none" | "magnetic" | "bright" })}>
               <option value="none">{L("原声 — 不染色", "Natural — no coloration")}</option>
               <option value="magnetic">{L("磁性 — 男声低沉厚实", "Magnetic — deep & thick (male)")}</option>
@@ -352,7 +357,7 @@ export function ExportDrawer() {
         )}
         {settings.voiceEnhance && (
           <Row label={L("空间混响", "Reverb")}>
-            <select value={settings.voiceReverb} style={inp}
+            <select value={settings.voiceReverb} style={inp} disabled={settings.voiceSwap}
               onChange={(e) => setSettings({ voiceReverb: e.target.value as "none" | "light" | "studio" })}>
               <option value="none">{L("无 — 干声", "None — dry")}</option>
               <option value="light">{L("轻微 — 一点房间感", "Light — hint of room")}</option>
@@ -695,14 +700,14 @@ function Group({ label, children }: { label: string; children: React.ReactNode }
   );
 }
 
-function Toggle({ label, hint, value, onChange }: { label: string; hint?: string; value: boolean; onChange: (v: boolean) => void }) {
+function Toggle({ label, hint, value, onChange, disabled }: { label: string; hint?: string; value: boolean; onChange: (v: boolean) => void; disabled?: boolean }) {
   return (
-    <div style={rowStyle}>
+    <div style={{ ...rowStyle, ...(disabled ? { opacity: 0.55 } : {}) }}>
       <div style={{ flex: 1 }}>
         <div style={labelStyle}>{label}</div>
         {hint && <div style={hintStyle}>{hint}</div>}
       </div>
-      <input type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} />
+      <input type="checkbox" checked={value} disabled={disabled} onChange={(e) => onChange(e.target.checked)} />
     </div>
   );
 }
