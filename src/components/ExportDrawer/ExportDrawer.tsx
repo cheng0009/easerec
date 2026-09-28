@@ -392,7 +392,7 @@ export function ExportDrawer() {
         <div style={rowStyle}>
           <div style={{ flex: 1 }}>
             <div style={labelStyle}>{L("附加品牌片尾", "Append brand outro")}</div>
-            <div style={hintStyle}>{L("成片结尾附加 2.8 秒「简录 EaseRec」品牌动画，感谢支持 ❤", "A 2.8s EaseRec brand card closes the film — title & slogan, thank you ❤")}</div>
+            <div style={hintStyle}>{L("成片结尾附加 3 秒「简录 EaseRec」品牌动画，感谢支持 ❤", "A 3s EaseRec brand card closes the film — title & slogan, thank you ❤")}</div>
           </div>
           <input type="checkbox" checked readOnly disabled title={L("固定开启", "Always on")} />
         </div>

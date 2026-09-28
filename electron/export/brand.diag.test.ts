@@ -94,7 +94,7 @@ describe.runIf(hasFfmpeg && hasInput)("brand outro diagnose", () => {
         }
       }
 
-      expect(durB).toBeGreaterThan(durA + 1); // brand adds ~2.8s
+      expect(durB).toBeGreaterThan(durA + 1); // brand adds ~3s
       expect(durB).toBeGreaterThan(20);
     } finally {
       // rmSync(dir, { recursive: true, force: true });

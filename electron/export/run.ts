@@ -619,7 +619,7 @@ ${tail}`;
         // line's own encoder settings, and the film splices via the concat
         // DEMUXER with stream copy — the exact splice the zoom/segment
         // concats already rely on. This avoids re-encoding the entire film
-        // just to append a 2.8s brand card. The gate guarantees the main
+        // just to append a 3s brand card. The gate guarantees the main
         // line was encoded by this pipeline (matching params) and its audio
         // is aac (or absent); anything else falls through to the filter
         // concat below, which re-encodes but accepts arbitrary inputs.

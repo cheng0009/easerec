@@ -336,7 +336,7 @@ describe("planExport", () => {
     expect(brand.output).toContain("brand.mp4");
     const all = brand.args!.join(" ");
     expect(all).toContain("color=c=0x0a0a0f");
-    expect(all).toContain("anullsrc=r=48000:cl=stereo:d=2.8");
+    expect(all).toContain("anullsrc=r=48000:cl=stereo:d=3");
     expect(all).toContain("drawtext=fontfile='C\\:/Windows/Fonts/msyh.ttc'");
     expect(all).toMatch(/让\s*知\s*识\s*输\s*出\s*回\s*归\s*纯\s*粹/);
     const fc = plan.stages.find((st) => st.kind === "final-concat")!;
@@ -376,8 +376,17 @@ describe("planExport", () => {
     expect(textStage.args).not.toContain("-loop");
   });
 
-  it("justifies the Chinese slogan to the English line width (both orientations)", () => {
-    const zh = "让知识输出回归纯粹";
+  it("brand composition is 10% bigger end to end (BRAND_SCALE)", () => {
+    // 1920x1080 landscape: slogan 21 -> 23px, logo ink box 59 -> 64px tall.
+    const L = brandLayout(1920, 1080, "让知识输出回归纯粹", "Let knowledge output return to purity.");
+    expect(L.sloganSize).toBe(23);
+    expect(L.logoH).toBe(64);
+    // Portrait: the stacked mark grows 115 -> 127px.
+    const P = brandLayout(1080, 1920, "让知识输出回归纯粹", "Let knowledge output return to purity.");
+    expect(P.logoH).toBe(127);
+  });
+
+  it("justifies the Chinese slogan to the English line width (both orientations)", () => {    const zh = "让知识输出回归纯粹";
     const en = "Let knowledge output return to purity.";
     for (const [w, h] of [[1920, 1080], [1080, 1920]] as const) {
       const L = brandLayout(w, h, zh, en);

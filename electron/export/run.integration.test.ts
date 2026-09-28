@@ -531,10 +531,10 @@ describe.runIf(hasFfmpeg)("brand outro (real ffmpeg)", () => {
     });
     expect(res).toContain("Saved to:");
     expect(existsSync(output)).toBe(true);
-    // 5s main + 2.8s brand card.
+    // 5s main + 3s brand card.
     const dur = await probeDurationSecs(output);
-    expect(dur).toBeGreaterThan(7.4);
-    expect(dur).toBeLessThan(8.2);
+    expect(dur).toBeGreaterThan(7.6);
+    expect(dur).toBeLessThan(8.4);
   }, 180000);
 
   it("generates the brand card with the bundled logo overlaid", async () => {
@@ -559,15 +559,15 @@ describe.runIf(hasFfmpeg)("brand outro (real ffmpeg)", () => {
     expect(res).toContain("Saved to:");
     expect(existsSync(output)).toBe(true);
     const dur = await probeDurationSecs(output);
-    expect(dur).toBeGreaterThan(7.4);
-    expect(dur).toBeLessThan(8.2);
+    expect(dur).toBeGreaterThan(7.6);
+    expect(dur).toBeLessThan(8.4);
   }, 180000);
 
   it("zoom pass + brand outro splices via stream copy (film is never re-encoded for the card)", async () => {
     // Zoom re-encodes the main line with the pipeline's own encoder and the
     // fixture audio is aac, so the final concat must take the copy path: only
-    // the 2.8s brand card is transcoded, the 5s film itself rides a stream
-    // copy. Duration stays exact (5 + 2.8s).
+    // the 3s brand card is transcoded, the 5s film itself rides a stream
+    // copy. Duration stays exact (5 + 3s).
     const input = path.join(dir, "brand_zoom_src.mp4");
     const output = path.join(dir, "brand_zoom_out.mp4");
     generateInput(input, 5);
@@ -593,8 +593,8 @@ describe.runIf(hasFfmpeg)("brand outro (real ffmpeg)", () => {
     expect(existsSync(output)).toBe(true);
     expect(log.some((l) => l.includes("final concat spliced via stream copy")), JSON.stringify(log, null, 2)).toBe(true);
     const dur = await probeDurationSecs(output);
-    expect(dur).toBeGreaterThan(7.4);
-    expect(dur).toBeLessThan(8.2);
+    expect(dur).toBeGreaterThan(7.6);
+    expect(dur).toBeLessThan(8.4);
     // The spliced output must be a playable, properly indexed mp4.
     const info = await probeMedia(FFMPEG, output);
     expect(info.hasAudio).toBe(true);

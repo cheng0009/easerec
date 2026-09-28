@@ -738,7 +738,7 @@ function escDrawtext(t: string): string {
 }
 
 /**
- * Built-in brand outro: a 2.8s dark card with the brand LOGO + product name and
+ * Built-in brand outro: a 3s dark card with the brand LOGO + product name and
  * slogan fading in/out — generated at export time via lavfi (no bundled asset).
  * Silent stereo track keeps the final concat uniform.
  */
@@ -801,18 +801,23 @@ function justifyToWidth(zh: string, en: string, fs: number): string {
   return parts.join("");
 }
 
+/** Overall linear scale of the brand outro composition (mark + slogans as one
+ *  group). 1.1 = the whole art reads ~10% bigger; positions re-center
+ *  automatically because everything below derives from these sizes. */
+export const BRAND_SCALE = 1.1;
+
 export function brandLayout(width: number, height: number, zh: string, en: string): BrandLayout {
   const portrait = height > width;
-  const size = 0.8 * (portrait ? 0.5 : 1 / 1.5);
+  const size = 0.8 * (portrait ? 0.5 : 1 / 1.5) * BRAND_SCALE;
   const sloganSize = Math.round(height * 0.037 * size);
-  const gapFrac = portrait ? 0.026 : 0.035;
+  const gapFrac = (portrait ? 0.026 : 0.035) * BRAND_SCALE;
   const lineH = Math.round(sloganSize * 1.31);
   const lineGap = Math.round(sloganSize * 0.45);
   const justifiedSlogan = justifyToWidth(zh, en, sloganSize);
   if (portrait) {
     // Stacked: the mark sits above the two slogan lines; each element is
     // centred horizontally, and the whole stack is centred vertically.
-    const logoH = Math.round(height * 0.06);
+    const logoH = Math.round(height * 0.06 * BRAND_SCALE);
     const logoW = Math.round(logoH * LOGO_ASPECT);
     const gapLogoText = Math.round(sloganSize * 1.8);
     const textBlockH = (2 * lineH + lineGap) - (en ? 0 : lineH + lineGap);
@@ -853,7 +858,7 @@ export function brandLayout(width: number, height: number, zh: string, en: strin
 
 export function brandStage(out: string, p: BrandParams): StageBase {
   const fps = Math.max(1, Math.round(p.fps));
-  const D = p.durationS ?? 2.8;
+  const D = p.durationS ?? 3;
   const font = p.fontPath.replace(/\\/g, "/").replace(/:/g, "\\:");
   const L = brandLayout(p.width, p.height, p.slogan, p.sloganEn ?? "");
   const sloganZh = escDrawtext(L.justifiedSlogan);
@@ -906,7 +911,7 @@ export function brandLogoStage(
   p: { fps: number; width: number; height: number; logoPath: string; layout: BrandLayout },
 ): StageBase {
   const fps = Math.max(1, Math.round(p.fps));
-  const D = 2.8;
+  const D = 3;
   const fadeOutAt = (D - 0.7).toFixed(2);
   const filterComplex =
     `[1:v]scale=${p.layout.logoW}:-1,format=rgba,fade=t=in:st=0.25:d=0.8:alpha=1,fade=t=out:st=${fadeOutAt}:d=0.7:alpha=1[lg];` +

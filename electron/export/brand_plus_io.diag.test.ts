@@ -113,7 +113,7 @@ describe.runIf(hasFfmpeg)("brand + user intro/outro composition", () => {
         return;
       }
       const dur = await probeDuration(out);
-      console.log(`VIDEO-IO dur=${dur}s (expect ~10.8 = 4+2+2+brand2.8)`);
+      console.log(`VIDEO-IO dur=${dur}s (expect ~11 = 4+2+2+brand3)`);
       expect(dur).toBeGreaterThanOrEqual(10);
     } finally {
       console.log("KEPT(video):", dir);
@@ -158,7 +158,7 @@ describe.runIf(hasFfmpeg)("brand + user intro/outro composition", () => {
         return;
       }
       const dur = await probeDuration(out);
-      console.log(`IMAGE-IO dur=${dur}s (expect ~10.8 = 4+2+2+brand2.8)`);
+      console.log(`IMAGE-IO dur=${dur}s (expect ~11 = 4+2+2+brand3)`);
       expect(dur).toBeGreaterThanOrEqual(10);
     } finally {
       console.log("KEPT(image):", dir);
