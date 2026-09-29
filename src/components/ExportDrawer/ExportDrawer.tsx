@@ -32,6 +32,35 @@ export function ExportDrawer() {
   const [cloneName, setCloneName] = useState("");
   const [cloning, setCloning] = useState(false);
   const [cloneMsg, setCloneMsg] = useState<string | null>(null);
+  // Pro license: mirror from the main process + activation UI state.
+  const license = useStore((s) => s.license);
+  const setLicense = useStore((s) => s.setLicense);
+  const [licCode, setLicCode] = useState("");
+  const [licBusy, setLicBusy] = useState(false);
+  const [licMsg, setLicMsg] = useState<string | null>(null);
+
+  const applyLicense = async () => {
+    setLicBusy(true); setLicMsg(null);
+    try {
+      const res = await tauriInvoke<{ ok: boolean; info?: { licenseNo: string; issuedAtIso: string }; error?: string }>("apply_license", { code: licCode });
+      if (res?.ok && res.info) {
+        setLicense({ pro: true, licenseNo: res.info.licenseNo, issuedAtIso: res.info.issuedAtIso });
+        setLicMsg(L("✓ Pro 已解锁，感谢支持！", "✓ Pro unlocked — thank you!"));
+        setLicCode("");
+      } else {
+        setLicMsg(`✗ ${res?.error ?? L("验证失败 — 请完整复制注册码", "Verification failed")}`);
+      }
+    } catch (e) {
+      setLicMsg(`✗ ${String(e)}`);
+    } finally { setLicBusy(false); }
+  };
+
+  const pasteLicense = async () => {
+    try {
+      const t = await navigator.clipboard.readText();
+      if (t) setLicCode(t.trim());
+    } catch { /* clipboard denied — typing still works */ }
+  };
   // Hotword auto-extraction: candidates from the last transcript, picked via
   // chips, then merged into settings.glossary.
   const [hwSuggested, setHwSuggested] = useState<string[] | null>(null);
@@ -184,7 +213,7 @@ export function ExportDrawer() {
           voice_enhance_strength: settings.voiceEnhanceStrength,
           voice_timbre: settings.voiceTimbre,
           voice_reverb: settings.voiceReverb,
-          voice_swap: settings.voiceSwap,
+          voice_swap: settings.voiceSwap && license.pro,
           minimax: {
             base_url: settings.minimax.baseUrl,
             api_key: settings.minimax.apiKey,
@@ -327,6 +356,33 @@ export function ExportDrawer() {
         </div>
       )}
 
+      {license.pro ? (
+        <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent)", fontFamily: "var(--font-mono)" }}>
+          ⭐ Pro 已授权{license.licenseNo ? ` · #${license.licenseNo}` : ""}{license.issuedAtIso ? ` · ${license.issuedAtIso}` : ""}
+        </div>
+      ) : (
+        <Group label={L("🔒 Pro 解锁", "🔒 Unlock Pro")}>
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 4 }}>
+            {L("Pro：AI 换声 · 移除品牌片尾 · 自定义片头片尾 · 高帧率导出。粘贴购买时收到的注册码（大小写敏感）：",
+               "Pro: AI voice swap · outro removal · custom intro/outro · high-fps export. Paste the code from your purchase (case-sensitive):")}
+          </div>
+          <textarea value={licCode} rows={3} style={styles.glossary} placeholder={"XXXXXX-XXXXXX-…"}
+            onChange={(e) => setLicCode(e.target.value)} />
+          <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+            <button style={styles.miniBtn} onClick={() => void pasteLicense()}>📋 {L("粘贴", "Paste")}</button>
+            <button style={{ ...styles.hwAdd, flex: 1, opacity: licBusy || !licCode ? 0.6 : 1 }}
+              onClick={() => void applyLicense()} disabled={licBusy || !licCode}>
+              {licBusy ? L("验证中…", "Verifying…") : L("🔓 解锁 Pro", "🔓 Unlock Pro")}
+            </button>
+          </div>
+          {licMsg && (
+            <div style={{ fontSize: 11, marginTop: 6, color: licMsg.startsWith("✓") ? "var(--accent)" : "var(--danger, #e5484d)", wordBreak: "break-all" }}>
+              {licMsg}
+            </div>
+          )}
+        </Group>
+      )}
+
       <Group label={L("画面与音频", "Picture & audio")}>
         <Toggle label={L("人声美化", "Voice enhance")}
           hint={settings.voiceSwap
@@ -393,22 +449,32 @@ export function ExportDrawer() {
           onChange={(v) => setSettings({ loudnorm: v })} />
         <Toggle label={L("同时导出竖版 9:16", "Also export vertical 9:16")} hint={L("按录制时的镜头轨迹自动取景（抖音/Shorts）", "Auto-reframed from the camera track (Douyin/Shorts)")} value={settings.verticalExport}
           onChange={(v) => setSettings({ verticalExport: v })} />
-        {/* Brand outro is fixed ON (it supports the project); not user-editable. */}
-        <div style={rowStyle}>
-          <div style={{ flex: 1 }}>
-            <div style={labelStyle}>{L("附加品牌片尾", "Append brand outro")}</div>
-            <div style={hintStyle}>{L("成片结尾附加 3 秒「简录 EaseRec」品牌动画，感谢支持 ❤", "A 3s EaseRec brand card closes the film — title & slogan, thank you ❤")}</div>
+        {/* Brand outro: free tier keeps it on (export enforces); Pro may remove. */}
+        {license.pro ? (
+          <Toggle label={L("附加品牌片尾", "Append brand outro")}
+            hint={L("成片结尾附加 3 秒「简录 EaseRec」品牌动画 — 感谢支持，Pro 可关闭", "A 3s EaseRec brand card closes the film — thank you ❤ Pro can turn it off")}
+            value={settings.brandOutro}
+            onChange={(v) => setSettings({ brandOutro: v })} />
+        ) : (
+          <div style={rowStyle}>
+            <div style={{ flex: 1 }}>
+              <div style={labelStyle}>{L("附加品牌片尾", "Append brand outro")}</div>
+              <div style={hintStyle}>{L("成片结尾附加 3 秒「简录 EaseRec」品牌动画，感谢支持 ❤（Pro 可移除）", "A 3s EaseRec brand card closes the film — thank you ❤ (Pro removes it)")}</div>
+            </div>
+            <input type="checkbox" checked readOnly disabled title={L("Pro 可移除", "Pro can remove it")} />
           </div>
-          <input type="checkbox" checked readOnly disabled title={L("固定开启", "Always on")} />
-        </div>
+        )}
       </Group>
 
       <Group label={L("AI 换声", "AI voice swap")}>
         <Toggle label={L("AI 换声（重新配音）", "AI voice swap (re-voice)")}
-          hint={L("讲解先转成文字，AI 校正并去除语气词口水词，再用选定音色重新配音替换原声（需 MiniMax API）", "Transcribe → AI-correct & strip fillers → re-voice with your chosen MiniMax voice")}
+          hint={license.pro
+            ? L("讲解先转成文字，AI 校正并去除语气词口水词，再用选定音色重新配音替换原声（需 MiniMax API）", "Transcribe → AI-correct & strip fillers → re-voice with your chosen MiniMax voice")
+            : L("Pro 功能 — 在上方解锁后可用；AI 用量走你自己的 MiniMax API Key", "Pro feature — unlock above; AI usage runs on your own MiniMax API key")}
           value={settings.voiceSwap}
-          onChange={(v) => setSettings({ voiceSwap: v })} />
-        {settings.voiceSwap && (
+          onChange={(v) => setSettings({ voiceSwap: v })}
+          disabled={!license.pro} />
+        {settings.voiceSwap && license.pro && (
           <div style={styles.subBlock}>
             <div style={{ fontSize: 10, color: "var(--text-muted)", marginBottom: 4 }}>
               {L("需填写你自己的 MiniMax API Key（minimax.cn 平台申请）。换声开启时人声美化链自动跳过 — TTS 已是干净人声。",

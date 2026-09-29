@@ -73,3 +73,5 @@ recordly_ref/
 # ---- Scratch / temp dev files ----
 /run*.sh
 /*.psd
+/.license-codes/
+/.license-secret/

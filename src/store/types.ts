@@ -150,6 +150,14 @@ export interface SettingsState {
   teleprompter: TeleprompterState;
 }
 
+/** Transient mirror of the main-process Pro license (never persisted here —
+ *  the userData license file is the source of truth). */
+export interface LicenseState {
+  pro: boolean;
+  licenseNo: string | null;
+  issuedAtIso: string | null;
+}
+
 /** Hub UI state. theme persists; the rest is transient. */
 export interface UiState {
   theme: "dark" | "light";

@@ -29,6 +29,7 @@ import {
 import { RecordingSession, listRecordings, readEdlFile, sidecarPaths, writeEdlFile } from "./recordingSession";
 import { scanBacktrace } from "./backtrace";
 import { runExportPipeline } from "./export/run";
+import { getLicenseStatus } from "./license/store";
 import type { ExportSettings } from "./export/plan";
 import type { EditEntry, EdlFile } from "../src/recording/edl";
 import { emptyEdl, privacyCutForMask } from "../src/recording/edl";
@@ -1619,6 +1620,16 @@ async function handleInvoke(cmd: string, args: Record<string, unknown>, _event?:
       }
     }
 
+    // --- Pro licensing ------------------------------------------------------
+    case "get_license_status": {
+      const { getLicenseStatus: status } = await import("./license/store");
+      return status();
+    }
+    case "apply_license": {
+      const { applyLicenseCode } = await import("./license/store");
+      return applyLicenseCode(String(args.code || ""));
+    }
+
     case "export_video":
       return runExport(args);
 
@@ -1653,6 +1664,19 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
     () => process.env.USERPROFILE || os.homedir(),
   );
   const config = (args.config ?? {}) as Record<string, unknown>;
+
+  // Pro feature gate — the userData license file is the source of truth;
+  // renderer-sent flags are stripped for unlicensed installs no matter what
+  // the UI allowed. Free tier keeps the complete core loop (recording,
+  // directing marks, cuts, zoom, enhance, subtitles, vertical); Pro covers
+  // AI voice swap, brand-outro removal, custom intro/outro and >30fps.
+  if (!getLicenseStatus().licensed) {
+    config.voice_swap = false;
+    config.brand_outro = true;
+    config.intro_enabled = false;
+    config.outro_enabled = false;
+    if (Number(config.fps) > 30) config.fps = 30;
+  }
 
   if (!inputPath && lastSavedRecording) inputPath = lastSavedRecording;
   if (!ffmpeg) return "FFmpeg not found.";

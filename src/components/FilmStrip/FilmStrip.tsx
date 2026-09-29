@@ -57,6 +57,12 @@ export function FilmStrip() {
   };
 
   const attachEnd = async (which: "intro" | "outro") => {
+    if (!useStore.getState().license.pro) {
+      // Pro enforcement also happens in the export path; this gate just
+      // prevents setting up something the free tier would silently drop.
+      setMarks({ feedback: "自定义片头/片尾是 Pro 功能 — 在导出面板解锁" });
+      return;
+    }
     const picked = await open({
       multiple: false,
       filters: [{ name: "媒体文件", extensions: ["mp4", "webm", "mov", "mkv", "png", "jpg", "jpeg", "gif", "webp", "bmp"] }],

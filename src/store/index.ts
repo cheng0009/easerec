@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { RecordingState, StudioState, EffectsState, WebcamState, SettingsState, MarksState, SubtitleStyleState, LlmConfigState, UiState, TeleprompterState } from "./types";
+import type { RecordingState, StudioState, EffectsState, WebcamState, SettingsState, MarksState, SubtitleStyleState, LlmConfigState, UiState, TeleprompterState, LicenseState } from "./types";
 import { DEFAULT_RECORDING_CONFIG } from "../lib/constants";
 
 export interface LanguageState {
@@ -22,6 +22,8 @@ interface AppStore extends LanguageState {
   setMarks: (partial: Partial<MarksState>) => void;
   ui: UiState;
   setUi: (partial: Partial<UiState>) => void;
+  license: LicenseState;
+  setLicense: (partial: Partial<LicenseState>) => void;
 }
 
 export const DEFAULT_SUBTITLE_STYLE: SubtitleStyleState = {
@@ -113,10 +115,8 @@ export const useStore = create<AppStore>((set) => ({
       outroPath: "",
       outroDurationS: 3,
       successSound: true,
+      brandOutro: true, // free tier keeps it (export enforces); Pro may toggle
       ...persisted,
-      // Brand outro is a fixed, non-user-editable feature (see ExportDrawer) —
-      // ignore any stale persisted value that would silently skip it.
-      brandOutro: true,
       // The prompter must never pop open at launch: ignore any persisted
       // `visible:true` (session-only state).
       teleprompter: { ...DEFAULT_TELEPROMPTER, ...(persisted.teleprompter ?? {}), visible: false },
@@ -138,6 +138,11 @@ export const useStore = create<AppStore>((set) => ({
     takeId: 0,
   },
   setMarks: (partial) => set((s) => ({ marks: { ...s.marks, ...partial } })),
+
+  // Pro license mirror — transient; the main-process license file is the
+  // source of truth, fetched at boot and after activation.
+  license: { pro: false, licenseNo: null, issuedAtIso: null },
+  setLicense: (partial) => set((s) => ({ license: { ...s.license, ...partial } })),
 
   // Hub UI
   ui: {
