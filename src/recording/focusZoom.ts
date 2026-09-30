@@ -250,6 +250,24 @@ export function parseMouseTrack(raw: string): MouseTrackSample[] {
   return out.sort((a, b) => a.tMs - b.tMs);
 }
 
+/** Click markers from the mouse sidecar (lines carrying `c: 1`). The
+ *  strongest attention signal for export-time focus detection: a click
+ *  refreshes a dwell's hold and a lone click still earns a zoom region. */
+export function parseMouseClicks(raw: string): MouseTrackSample[] {
+  const out: MouseTrackSample[] = [];
+  for (const line of raw.split("\n")) {
+    const l = line.trim();
+    if (!l) continue;
+    try {
+      const o = JSON.parse(l) as MouseTrackSample & { c?: number };
+      if (o.c === 1 && Number.isFinite(o.tMs) && Number.isFinite(o.x) && Number.isFinite(o.y)) {
+        out.push({ tMs: o.tMs, x: clamp(o.x, 0, 1), y: clamp(o.y, 0, 1) });
+      }
+    } catch { /* skip bad line */ }
+  }
+  return out.sort((a, b) => a.tMs - b.tMs);
+}
+
 
 /** Camera state at an arbitrary time (binary search + linear interpolation
  *  between replay frames). Used by the frame-by-frame Chromium renderer. */

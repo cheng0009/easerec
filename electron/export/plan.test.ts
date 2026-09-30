@@ -526,6 +526,39 @@ describe("planExport", () => {
     expect(kinds).not.toContain("audio");
     expect(kinds).not.toContain("asr");
   });
+
+  it("a lone click drives a zoom region even with no dwell track", () => {
+    // Fast flitting (150ms static bursts, teleports between) yields no
+    // dwells — only the CLICK can produce zoom spans.
+    const track: { tMs: number; x: number; y: number }[] = [];
+    for (let seg = 0; seg < 40; seg++) {
+      const x = seg % 2 === 0 ? 0.25 : 0.75;
+      for (let k = 0; k < 5; k++) track.push({ tMs: seg * 160 + k * 30, x, y: 0.5 });
+    }
+    const noClick = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 6400,
+      settings: { ...baseSettings(), zoomEnabled: true },
+      mouseTrack: track,
+    });
+    expect(kindsOf(noClick.stages)).toEqual(["transcode"]); // nothing to zoom
+
+    const clicked = planExport({
+      inputPath: "C:/rec/r.webm", outputPath: "C:/out/o.mp4", workDir: "C:/tmp",
+      edl: emptyEdl(), durationMs: 6400,
+      settings: { ...baseSettings(), zoomEnabled: true },
+      mouseTrack: track,
+      mouseClicks: [{ tMs: 3200, x: 0.3, y: 0.3 }],
+    });
+    const kinds = kindsOf(clicked.stages);
+    expect(kinds).toContain("zoomspan");
+    expect(kinds).toContain("concat");
+    // The click's zoom eases in BEFORE the click (lead-in) — a span's -ss
+    // must start earlier than the click time.
+    const spans = clicked.stages.filter((s) => s.kind === "zoomspan");
+    const eased = spans.find((s) => s.args!.includes("-vf"));
+    expect(eased).toBeTruthy();
+  });
 });
 
 describe("privacy mask burn", () => {

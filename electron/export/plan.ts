@@ -42,6 +42,9 @@ export interface ExportSettings {
   zoomEnabled: boolean;
   /** Zoom level for the follow-focus render. */
   zoomLevel: number;
+  /** Follow-focus trigger sensitivity ("fast" 250ms | "steady" 400ms |
+   *  "slow" 600ms dwell). */
+  zoomSensitivity?: string;
   /** Append the built-in brand outro clip (generated at export). */
   brandOutro: boolean;
   /** Windows font file used to render the brand text. */
@@ -1013,6 +1016,10 @@ export interface PlanInput {
   camTrackPath?: string;
   /** Mouse trajectory sidecar samples (Recordly-style zoom regions). */
   mouseTrack?: { tMs: number; x: number; y: number }[];
+  /** Physical click markers (c:1 lines of the mouse sidecar) — the strongest
+   *  attention signal: a click refreshes a dwell's hold, a lone click still
+   *  earns a zoom region. */
+  mouseClicks?: { tMs: number; x: number; y: number }[];
   /** Region-recording crop (normalized primary-screen), if set. */
   recordRegion?: { x: number; y: number; w: number; h: number } | null;
   /** Whether the input actually carries an audio stream (probed by the runner).
@@ -1180,19 +1187,27 @@ export function planExport(input: PlanInput): ExportPlan {
 
   // Zoom regions in CROPPED space: remap track coords into the crop.
   const rr2 = rr ?? null;
-  const remappedTrack = (input.mouseTrack ?? []).map((m) => ({
-    tMs: m.tMs,
-    x: rr2 ? (m.x - rr2.x) / rr2.w : m.x,
-    y: rr2 ? (m.y - rr2.y) / rr2.h : m.y,
-  })).filter((m) => m.x >= -0.02 && m.x <= 1.02 && m.y >= -0.02 && m.y <= 1.02)
-    .map((m) => ({ ...m, x: Math.max(0, Math.min(1, m.x)), y: Math.max(0, Math.min(1, m.y)) }));
+  const remapPoint = (m: { tMs: number; x: number; y: number }) => {
+    const x = rr2 ? (m.x - rr2.x) / rr2.w : m.x;
+    const y = rr2 ? (m.y - rr2.y) / rr2.h : m.y;
+    return { tMs: m.tMs, x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
+  };
+  const remappedTrack = (input.mouseTrack ?? []).map(remapPoint)
+    .filter((m) => m.x >= -0.02 && m.x <= 1.02 && m.y >= -0.02 && m.y <= 1.02);
+  const remappedClicks = (input.mouseClicks ?? []).map(remapPoint)
+    .filter((m) => m.x >= 0 && m.x <= 1 && m.y >= 0 && m.y <= 1);
 
+  // Trigger sensitivity: how long the cursor must linger (or how loudly a
+  // click must land) before the camera commits. "steady" is the Recordly
+  // default; "fast" catches quicker interactions, "slow" only commits to
+  // obvious working sessions.
+  const dwellMs = settings.zoomSensitivity === "fast" ? 250 : settings.zoomSensitivity === "slow" ? 600 : 400;
   const regions = settings.zoomEnabled
     ? detectZoomRegions(remappedTrack, {
         depth: settings.zoomLevel ?? 1.5,
-        dwellMs: 400,
+        dwellMs,
         radius: 0.08,
-      })
+      }, remappedClicks)
     : [];
   const focusSpans: FocusSpan[] = regions.length
     ? buildFocusSpans(regions, durationMs, 400)

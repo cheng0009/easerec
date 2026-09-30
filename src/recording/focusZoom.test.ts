@@ -5,6 +5,7 @@ import {
   cameraToRects,
   downsampleCamera,
   lerpExpression,
+  parseMouseClicks,
   parseMouseTrack,
   replayCamera,
   viewportRect,
@@ -201,6 +202,28 @@ describe("parseMouseTrack", () => {
 
   it("empty input yields empty track", () => {
     expect(parseMouseTrack("")).toEqual([]);
+  });
+});
+
+describe("parseMouseClicks", () => {
+  it("extracts only c:1 markers; movement lines and junk are ignored", () => {
+    const raw = [
+      '{"tMs":0,"x":0.5,"y":0.5}',
+      '{"tMs":900,"x":0.31,"y":0.42,"c":1}',
+      '{"tMs":1200,"x":0.32,"y":0.44}',
+      '{"tMs":1500,"x":0.8,"y":0.2,"c":1}',
+      '{"tMs":1800,"x":0.9,"y":0.9,"c":0}',
+      "garbage",
+    ].join("\n");
+    const clicks = parseMouseClicks(raw);
+    expect(clicks.map((c) => c.tMs)).toEqual([900, 1500]);
+    expect(clicks[0]).toEqual({ tMs: 900, x: 0.31, y: 0.42 });
+    // Movement parsing is unaffected by the extra field.
+    expect(parseMouseTrack(raw)).toHaveLength(5);
+  });
+
+  it("empty input yields empty clicks", () => {
+    expect(parseMouseClicks("")).toEqual([]);
   });
 });
 

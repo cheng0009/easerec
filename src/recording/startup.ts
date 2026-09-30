@@ -283,11 +283,13 @@ export function installDirectorController(): void {
     try { director.recorder.setCursorPosition(p.x, p.y); } catch { /* ignore */ }
   }).catch(() => {});
 
-  // Global mouse click (from the main-process input hook): while step-marker
-  // mode is on, each physical click places the next numbered marker at the
-  // cursor (normalized to the overlay/screen size).
+  // Global mouse click (from the main-process input hook): always lands in
+  // the recording's mouse sidecar (c:1 — the strongest attention signal for
+  // export-time follow-focus), and while step-marker mode is on also places
+  // the next numbered marker at the cursor.
   void listenEvent<{ x: number; y: number }>("dc-mouse-click", (p) => {
     try {
+      try { director.recorder.recordClick(p.x, p.y); } catch { /* not recording */ }
       const st = useStore.getState();
       if (!st.effects.stepModeActive) return;
       const dispW = Math.max(1, window.screen?.width || st.effects.stepMarkers.length + 1);

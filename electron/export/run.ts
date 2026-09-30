@@ -57,6 +57,9 @@ export interface RunExportRequest {
   camTrackPath?: string;
   /** Mouse trajectory (follow-focus + vertical reframe source). */
   mouseTrack?: { tMs: number; x: number; y: number }[];
+  /** Physical click markers from the mouse sidecar (c:1) — attention
+   *  signals for follow-focus + vertical framing. */
+  mouseClicks?: { tMs: number; x: number; y: number }[];
   llmConfig: LlmConfig;
   /** MiniMax voice-swap plumbing; presence of key+voiceId activates it. */
   voiceSwap?: VoiceSwapRequest;
@@ -547,6 +550,7 @@ export async function runExportPipeline(req: RunExportRequest): Promise<string> 
     settings,
     camTrackPath: req.camTrackPath,
     mouseTrack: req.mouseTrack,
+    mouseClicks: req.mouseClicks,
     recordRegion: req.recordRegion ?? null,
     inputVideoSize,
     inputAudioCodec,
@@ -760,7 +764,11 @@ ${tail}`;
         // fall back to the legacy cam track; static centered crop last.
         let samples = readCamTrack(stage.camTrackPath || "");
         if ((req.mouseTrack?.length ?? 0) > 5) {
-          const regions = detectZoomRegions(req.mouseTrack!, { depth: req.settings.zoomLevel ?? 1.5 });
+          const regions = detectZoomRegions(
+            req.mouseTrack!,
+            { depth: req.settings.zoomLevel ?? 1.5 },
+            req.mouseClicks ?? [],
+          );
           samples = regions.map((r) => {
             const vw = 1 / r.depth;
             const vh = 1 / r.depth;

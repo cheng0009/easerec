@@ -45,6 +45,15 @@ export interface RegionOptions {
    *  ffmpeg stages (zoom in / hold / glide / zoom out), each a separate
    *  encode process; past ~20 the export cost dwarfs the storytelling. */
   maxRegions: number;
+  /** While zoomed, the focus point is kept at least this far from the
+   *  VIEWPORT edge (fraction of viewport) — clicking near the screen edge
+   *  must not park the subject on the frame border. */
+  focusMargin: number;
+  /** A merged region whose focus points drift further apart than this
+   *  (fraction of width) splits instead — slow drifts become connected
+   *  GLIDES that follow the work, not one mega-region frozen at an
+   *  averaged focus between two workplaces. */
+  driftSplit: number;
 }
 
 /**
@@ -70,7 +79,16 @@ export const DEFAULT_REGION_OPTIONS: RegionOptions = {
   mergeGapMs: CONNECTED_ZOOM_GAP_MS,
   minRegionMs: 1500,
   maxRegions: 20,
+  focusMargin: 0.12, // focus stays >=12% away from the viewport edge
+  driftSplit: 0.30,  // beyond this the camera GLIDES to follow, not freezes
 };
+
+/** Exit hysteresis: a brief excursion out of the dwell radius (boundary
+ *  jitter, a quick reach for a scrollbar) must not split a working session.
+ *  Excursions shorter than this rejoin the same cluster; a jump beyond
+ *  radius*2.5 (a real hand-off) breaks it immediately. */
+const DWELL_EXIT_HYSTERESIS_MS = 200;
+const DWELL_TELEPORT_FACTOR = 2.5;
 
 interface Cluster {
   cx: number;
@@ -81,9 +99,14 @@ interface Cluster {
 }
 
 /** Anchor-based dwell clusters: a cluster is anchored at its first sample;
- *  samples within `radius` of the ANCHOR extend it, anything else breaks it.
- *  (A running centroid would rubber-band across minutes of slow wandering and
- *  glue unrelated activity into one giant "dwell".) */
+ *  samples within `radius` of the running centroid extend it. (A pure
+ *  centroid anchor would rubber-band across minutes of slow wandering and
+ *  glue unrelated activity into one giant "dwell".)
+ *
+ *  Hysteresis: the first out-of-radius sample starts a grace window instead
+ *  of breaking the cluster; if the cursor returns within the window (and
+ *  never jumped beyond the teleport factor) the excursion counts as the
+ *  same working session. */
 export function detectDwells(
   track: TrackPoint[],
   opts: Pick<RegionOptions, "dwellMs" | "radius">,
@@ -93,29 +116,59 @@ export function detectDwells(
   const radius = Math.max(0.01, opts.radius);
 
   let cur: Cluster | null = null;
+  let outSince: TrackPoint | null = null; // first sample of the current excursion
   const flush = () => {
     if (cur && cur.endMs - cur.startMs >= opts.dwellMs && cur.samples >= 2) {
       clusters.push(cur);
     }
     cur = null;
+    outSince = null;
+  };
+  const anchor = (p: TrackPoint) => {
+    cur = { cx: p.x, cy: p.y, startMs: p.tMs, endMs: p.tMs, samples: 1 };
+    outSince = null;
+  };
+  const absorb = (p: TrackPoint) => {
+    cur!.cx = (cur!.cx * cur!.samples + p.x) / (cur!.samples + 1);
+    cur!.cy = (cur!.cy * cur!.samples + p.y) / (cur!.samples + 1);
+    cur!.samples++;
+    cur!.endMs = p.tMs;
   };
 
   for (const p of track) {
     if (!cur) {
+      // Inline (not via anchor()) so TS keeps the union type across iterations.
       cur = { cx: p.x, cy: p.y, startMs: p.tMs, endMs: p.tMs, samples: 1 };
+      outSince = null;
       continue;
     }
     const dist = Math.hypot(p.x - cur.cx, p.y - cur.cy);
     if (dist <= radius) {
-      // Running centroid within the anchored radius.
-      cur.cx = (cur.cx * cur.samples + p.x) / (cur.samples + 1);
-      cur.cy = (cur.cy * cur.samples + p.y) / (cur.samples + 1);
-      cur.samples++;
-      cur.endMs = p.tMs;
-    } else {
-      flush();
-      cur = { cx: p.x, cy: p.y, startMs: p.tMs, endMs: p.tMs, samples: 1 };
+      absorb(p);
+      outSince = null;
+      continue;
     }
+    // Out of radius: teleport-scale jumps break at once; small excursions
+    // get the grace window before the session is declared over.
+    if (dist > radius * DWELL_TELEPORT_FACTOR) {
+      flush();
+      anchor(p);
+      continue;
+    }
+    if (!outSince) {
+      outSince = p;
+      continue;
+    }
+    if (p.tMs - outSince.tMs > DWELL_EXIT_HYSTERESIS_MS) {
+      // The excursion stuck — end the session and restart at the point the
+      // cursor actually left (not at the current sample).
+      const exc = outSince;
+      flush();
+      anchor(exc);
+      absorb(p);
+    }
+    // else: still inside the grace window — wait (time keeps flowing into
+    // the session only if the cursor returns).
   }
   flush();
   return clusters;
@@ -124,14 +177,46 @@ export function detectDwells(
 /**
  * Detect zoom regions: dwell clusters become regions with lead-in/hold and
  * depth; nearby regions merge; overlapping regions are clipped.
+ *
+ * `clicks` (global click timestamps+positions from the recording sidecar)
+ * are folded in as zero-length dwells: a click inside an active session
+ * REFRESHES its hold (the user is demonstrably still working there), and a
+ * lone click still earns a brief zoom — a click is the strongest attention
+ * signal there is, even when the cursor never settles for dwellMs.
  */
 export function detectZoomRegions(
   track: TrackPoint[],
   opts: Partial<RegionOptions> = {},
+  clicks: TrackPoint[] = [],
 ): ZoomRegion[] {
   const o = { ...DEFAULT_REGION_OPTIONS, ...opts };
   const depth = Math.max(1.05, Math.min(3, o.depth));
   const clusters = detectDwells(track, o);
+
+  // Clicks fold in at the CLUSTER level (adjacent-region merging below could
+  // not reach past an unrelated region): a click on/near a recent dwell
+  // refreshes that session's hold; only clicks hitting nothing become their
+  // own short "click regions".
+  const nudgeDist = Math.max(o.radius * 2, 0.15);
+  const pending: TrackPoint[] = [...clicks].sort((a, b) => a.tMs - b.tMs);
+  const consumed = new Set<TrackPoint>();
+  for (const c of clusters) {
+    for (const k of pending) {
+      if (consumed.has(k)) continue;
+      const near = Math.hypot(k.x - c.cx, k.y - c.cy) <= nudgeDist;
+      const timely = k.tMs >= c.startMs - o.mergeGapMs && k.tMs <= c.endMs + o.mergeGapMs;
+      if (near && timely) {
+        c.endMs = Math.max(c.endMs, k.tMs); // the region adds holdMs on top
+        consumed.add(k);
+      }
+    }
+  }
+  for (const k of pending) {
+    if (!consumed.has(k)) {
+      clusters.push({ cx: k.x, cy: k.y, startMs: k.tMs, endMs: k.tMs, samples: 2 });
+    }
+  }
+  clusters.sort((a, b) => a.startMs - b.startMs);
   if (clusters.length === 0) return [];
 
   // Clusters → regions with lead-in and hold.
@@ -146,24 +231,30 @@ export function detectZoomRegions(
   // Merge regions whose gap is small AND whose focus is essentially the same
   // spot (the cursor nudged during one working session). Distant dwells stay
   // separate — a zoom to the screen edge must not swallow a later center
-  // dwell, and vice versa.
+  // dwell, and vice versa. Drift cap: once a merged session's focus points
+  // span more than `driftSplit`, further merges stop — the camera should
+  // GLIDE after slow drift instead of freezing at an averaged midpoint.
   const maxMergeDist = Math.max(o.radius * 2, 0.15);
-  const merged: ZoomRegion[] = [];
+  const merged: { r: ZoomRegion; fx: number; fy: number }[] = [];
   for (const r of regions) {
     const prev = merged[merged.length - 1];
-    const dist = prev ? Math.hypot(r.cx - prev.cx, r.cy - prev.cy) : Infinity;
-    if (prev && r.startMs - prev.endMs <= o.mergeGapMs && dist <= maxMergeDist) {
-      prev.endMs = Math.max(prev.endMs, r.endMs);
-      prev.cx = (prev.cx + r.cx) / 2;
-      prev.cy = (prev.cy + r.cy) / 2;
-      continue;
+    if (prev) {
+      const dist = Math.hypot(r.cx - prev.r.cx, r.cy - prev.r.cy);
+      const drift = Math.hypot(r.cx - prev.fx, r.cy - prev.fy);
+      if (r.startMs - prev.r.endMs <= o.mergeGapMs && dist <= maxMergeDist && drift <= o.driftSplit) {
+        prev.r.endMs = Math.max(prev.r.endMs, r.endMs);
+        prev.r.cx = (prev.r.cx + r.cx) / 2;
+        prev.r.cy = (prev.r.cy + r.cy) / 2;
+        continue;
+      }
     }
-    merged.push({ ...r });
+    merged.push({ r: { ...r }, fx: r.cx, fy: r.cy });
   }
 
   // De-overlap and drop short regions.
   const out: ZoomRegion[] = [];
-  for (const r of merged) {
+  for (const m of merged) {
+    const r = m.r;
     if (out.length) {
       const prev = out[out.length - 1];
       if (r.startMs < prev.endMs) r.startMs = prev.endMs;
@@ -173,15 +264,33 @@ export function detectZoomRegions(
 
   // Keep the LONGEST dwells when the mouse sprayed more micro-regions than
   // the render budget allows (chronological order preserved).
+  let keep = out;
   if (out.length > o.maxRegions) {
-    const keep = new Set(
+    const ids = new Set(
       [...out]
         .sort((a, b) => (b.endMs - b.startMs) - (a.endMs - a.startMs))
         .slice(0, o.maxRegions),
     );
-    return out.filter((r) => keep.has(r));
+    keep = out.filter((r) => ids.has(r));
   }
-  return out;
+
+  // Focus safety margin: the camera center must keep the working point at
+  // least `focusMargin` (fraction of the viewport) inside the frame. The
+  // feasible center range around the focus intersects the no-black-edge
+  // range [half, 1-half]; when the focus is extreme they may not intersect —
+  // then no-black-edge wins (the subject hugs the border, never leaves).
+  const mv = Math.min(0.45, Math.max(0, o.focusMargin));
+  return keep.map((r) => {
+    const half = 0.5 / r.depth;
+    const slack = Math.max(0, half - mv / r.depth);
+    const clampAxis = (focus: number): number => {
+      const lo = Math.max(half, focus - slack);
+      const hi = Math.min(1 - half, focus + slack);
+      if (lo <= hi) return Math.max(lo, Math.min(hi, focus));
+      return Math.max(half, Math.min(1 - half, focus));
+    };
+    return { ...r, cx: clampAxis(r.cx), cy: clampAxis(r.cy) };
+  });
 }
 
 export interface FocusSpan {

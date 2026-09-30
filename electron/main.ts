@@ -1689,12 +1689,17 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
   const edl: EdlFile = readEdlFile(sidecars.editsPath);
   const durationMs = edl.durationMs ?? (await probeDurationMs(ffmpeg, inputPath)) ?? 0;
 
-  // Mouse trajectory for the export-time follow-focus render.
+  // Mouse trajectory + click markers for the export-time follow-focus render.
+  // Clicks (c:1 lines) are the strongest attention signal — they refresh a
+  // dwell's hold and a lone click still earns a zoom region.
   let mouseTrack: { tMs: number; x: number; y: number }[] = [];
+  let mouseClicks: { tMs: number; x: number; y: number }[] = [];
   if (config.zoom_enabled === true) {
     try {
-      const { parseMouseTrack } = await import("../src/recording/focusZoom");
-      mouseTrack = parseMouseTrack(fs.readFileSync(sidecars.mouseTrackPath, "utf8"));
+      const { parseMouseTrack, parseMouseClicks } = await import("../src/recording/focusZoom");
+      const raw = fs.readFileSync(sidecars.mouseTrackPath, "utf8");
+      mouseTrack = parseMouseTrack(raw);
+      mouseClicks = parseMouseClicks(raw);
     } catch { /* no sidecar */ }
   }
 
@@ -1724,6 +1729,7 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
     fps: Number(config.fps) || 60,
     zoomEnabled: config.zoom_enabled === true,
     zoomLevel: Number(config.zoom_level) || 1.5,
+    zoomSensitivity: config.zoom_sensitivity === "fast" || config.zoom_sensitivity === "slow" ? String(config.zoom_sensitivity) : "steady",
     brandOutro: config.brand_outro !== false, // default ON
     brandFontPath: brandFont,
     brandLogoPath: brandLogo,
@@ -1772,6 +1778,7 @@ async function runExport(args: Record<string, unknown>): Promise<string> {
     edl,
     durationMs,
     settings: { ...settings, zoomEnabled: config.zoom_enabled === true },
+    mouseClicks,
     voiceSwap: {
       baseUrl: String(minimax.base_url || ""),
       apiKey: String(minimax.api_key || ""),

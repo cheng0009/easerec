@@ -118,8 +118,9 @@ export class Recorder {
   // "录轨迹，导出渲染": recording keeps a 1:1 frame; only the cursor path is
   // logged here (~30ms cadence) and flushed to the mouse sidecar, so the
   // follow-focus motion costs NOTHING while recording and is rendered by
-  // ffmpeg (zoompan) at export.
-  private mouseSamples: { tMs: number; x: number; y: number }[] = [];
+  // ffmpeg (zoompan) at export. `c: 1` marks a physical click (attention
+  // signal for export-time focus detection).
+  private mouseSamples: { tMs: number; x: number; y: number; c?: number }[] = [];
   private lastMouseSampleAt = 0;
 
   // --- Capture source -------------------------------------------------------
@@ -604,6 +605,23 @@ export class Recorder {
       const batch = this.mouseSamples.splice(0, this.mouseSamples.length);
       void dcInvoke("recording_mousesamples", { samples: batch }).catch(() => {});
     }
+  }
+
+  /** Record a physical click (from the main-process global click hook) into
+   *  the mouse sidecar with `c: 1`. Clicks flush immediately — they are rare
+   *  and precious, losing one to a crash would blur the focus story. */
+  recordClick(x: number, y: number): void {
+    if (!this.recording || !this.sessionActive) return;
+    const dispW = Math.max(1, window.screen?.width || this.sourceSize.width);
+    const dispH = Math.max(1, window.screen?.height || this.sourceSize.height);
+    this.mouseSamples.push({
+      tMs: this.getElapsedMs(),
+      x: Math.max(0, Math.min(1, x / dispW)),
+      y: Math.max(0, Math.min(1, y / dispH)),
+      c: 1,
+    });
+    const batch = this.mouseSamples.splice(0, this.mouseSamples.length);
+    void dcInvoke("recording_mousesamples", { samples: batch }).catch(() => {});
   }
 
   /** Selected record region (normalized primary-screen) for this session. */

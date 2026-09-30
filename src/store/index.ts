@@ -89,6 +89,7 @@ export const useStore = create<AppStore>((set) => ({
     const persisted = loadSettingsFromStorage();
     return {
       ...DEFAULT_RECORDING_CONFIG,
+      zoomSensitivity: "steady",
       outputDir: "",
       modelPath: "",
       subtitleEnabled: false,

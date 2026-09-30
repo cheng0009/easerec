@@ -97,6 +97,8 @@ export interface SettingsState {
   zoomEnabled: boolean;
   /** Zoom level of the follow-focus render. */
   zoomLevel: number;
+  /** Follow-focus trigger sensitivity ("fast" | "steady" | "slow"). */
+  zoomSensitivity: "fast" | "steady" | "slow";
   outputDir: string;
   modelPath: string;
   subtitleEnabled: boolean;

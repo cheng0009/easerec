@@ -132,8 +132,10 @@ export class RecordingSession {
     } catch { /* region is best-effort */ }
   }
 
-  /** Append mouse-trajectory samples (export-time follow-focus source). */
-  appendMouseSamples(samples: { tMs: number; x: number; y: number }[]): void {
+  /** Append mouse-trajectory samples (export-time follow-focus source).
+   *  Samples carrying `c: 1` are physical clicks — attention markers the
+   *  export-side zoom detection treats as the strongest focus signal. */
+  appendMouseSamples(samples: { tMs: number; x: number; y: number; c?: number }[]): void {
     if (this.closed || !samples.length) return;
     try {
       const lines = samples.map((s) => JSON.stringify(s)).join("\n") + "\n";

@@ -207,6 +207,7 @@ export function ExportDrawer() {
           fps: settings.fps,
           zoom_enabled: settings.zoomEnabled,
           zoom_level: settings.zoomLevel ?? 1.5,
+          zoom_sensitivity: settings.zoomSensitivity ?? "steady",
           brand_outro: settings.brandOutro,
           brand_lang: useStore.getState().current === "en" ? "en" : "zh",
           voice_enhance: settings.voiceEnhance,
@@ -384,6 +385,35 @@ export function ExportDrawer() {
       )}
 
       <Group label={L("画面与音频", "Picture & audio")}>
+        <Toggle label={L("智能跟焦缩放", "Smart follow-focus zoom")}
+          hint={L("鼠标停留或点击处自动放大，讲解更聚焦；离开后缓慢回到全景", "Auto-zooms where you dwell or click; eases back out when you leave")}
+          value={settings.zoomEnabled}
+          onChange={(v) => setSettings({ zoomEnabled: v })} />
+        {settings.zoomEnabled && (
+          <>
+            <Row label={L("跟焦倍率", "Zoom level")}>
+              <select value={settings.zoomLevel} style={inp}
+                onChange={(e) => setSettings({ zoomLevel: Number(e.target.value) })}>
+                <option value={1.3}>{L("1.3× — 轻微（画面更清晰）", "1.3× — subtle (sharpest)")}</option>
+                <option value={1.5}>{L("1.5× — 推荐", "1.5× — recommended")}</option>
+                <option value={1.8}>1.8×</option>
+                <option value={2.0}>{L("2.0× — 强聚焦（建议 2K/4K 源）", "2.0× — tight (2K/4K sources)")}</option>
+                <option value={2.5}>2.5×</option>
+              </select>
+            </Row>
+            <Row label={L("触发灵敏度", "Trigger speed")}>
+              <select value={settings.zoomSensitivity} style={inp}
+                onChange={(e) => setSettings({ zoomSensitivity: e.target.value as "fast" | "steady" | "slow" })}>
+                <option value="fast">{L("快 — 停留 0.25 秒即聚焦（演示节奏）", "Fast — zoom after 0.25s dwell")}</option>
+                <option value="steady">{L("稳 — 停留 0.4 秒聚焦（推荐）", "Steady — 0.4s dwell (recommended)")}</option>
+                <option value="slow">{L("慢 — 停留 0.6 秒才聚焦（更少的镜头切换）", "Slow — 0.6s dwell (fewer cuts)")}</option>
+              </select>
+            </Row>
+            <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
+              {L("点击也是聚焦信号：点过的位置会被放大并短暂保持；长按操作缓慢移动时，镜头会平滑跟随。", "Clicks focus too: clicked spots zoom and hold; slow working drifts are followed by smooth camera glides.")}
+            </div>
+          </>
+        )}
         <Toggle label={L("人声美化", "Voice enhance")}
           hint={settings.voiceSwap
             ? L("AI 换声开启时自动跳过（TTS 已是干净人声）；若换声失败回退原声，美化仍会生效", "Auto-skipped while AI voice swap is on; still applied if the swap falls back to the original voice")
